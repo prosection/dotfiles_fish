@@ -64,6 +64,7 @@ abbr update "sudo apt update;sudo apt upgrade -y"
 abbr docup "docker compose up -d"
 abbr docdown "docker compose down"
 abbr docfdown "docker compose down --rmi all --volumes --remove-orphans"
+abbr doclog "docker compose logs -f"
 
 #view
 set -g theme_display_date yes
