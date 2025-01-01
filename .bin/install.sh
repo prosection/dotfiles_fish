@@ -61,6 +61,9 @@ cat > ~/.config/fish/config.fish << EOL
 # Alias
 abbr ee "exa -aal --icons"
 abbr update "sudo apt update;sudo apt upgrade -y"
+abbr docup "docker compose up -d"
+abbr docdown "docker compose down"
+abbr docfdown "docker compose down --rmi all --volumes --remove-orphans"
 
 #view
 set -g theme_display_date yes
