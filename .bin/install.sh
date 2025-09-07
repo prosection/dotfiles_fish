@@ -14,7 +14,7 @@ readonly SCRIPT_NAME="$(basename "$0")"
 readonly CONFIG_DIR="$HOME/.config/fish"
 readonly CONFIG_FILE="$CONFIG_DIR/config.fish"
 readonly BACKUP_SUFFIX="backup.$(date +%Y%m%d_%H%M%S)"
-readonly DRY_RUN=${DRY_RUN:-false}
+DRY_RUN=${DRY_RUN:-false}
 
 # カラー出力用
 readonly RED='\033[0;31m'
@@ -105,8 +105,6 @@ check_sudo() {
 
 # OS検出関数
 detect_os() {
-    log_info "OSの検出を行っています..."
-    
     if [[ "$OSTYPE" == "darwin"* ]]; then
         echo "macos"
     elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -150,6 +148,13 @@ install_fish_macos() {
         return 1
     }
     
+    # インストール後にfishが正しく利用可能か確認
+    if ! command -v fish &> /dev/null; then
+        log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
+        log_error "PATHの更新が必要な可能性があります。新しいターミナルセッションで再試行してください。"
+        return 1
+    fi
+    
     log_success "macOS用のFishインストールが完了しました。"
 }
 
@@ -179,6 +184,13 @@ install_fish_ubuntu() {
         return 1
     }
     
+    # インストール後にfishが正しく利用可能か確認
+    if ! command -v fish &> /dev/null; then
+        log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
+        log_error "PATHの更新が必要な可能性があります。新しいターミナルセッションで再試行してください。"
+        return 1
+    fi
+    
     log_success "Ubuntu/Debian用のFishインストールが完了しました。"
 }
 
@@ -187,9 +199,26 @@ install_fish_raspberrypi() {
     log_info "Raspberry Pi用のFishインストールを開始します..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] openSUSEリポジトリの追加とFishのインストールを実行する予定"
+        log_info "[DRY RUN] Fishのインストールを実行する予定（標準リポジトリまたはopenSUSEリポジトリ）"
         return 0
     fi
+    
+    # まず標準リポジトリからのインストールを試行
+    log_info "標準リポジトリからFishのインストールを試行しています..."
+    sudo apt update
+    
+    if sudo apt install fish -y 2>/dev/null; then
+        log_success "標準リポジトリからのFishインストールが完了しました。"
+        
+        # インストール後にfishが正しく利用可能か確認
+        if command -v fish &> /dev/null; then
+            log_success "Raspberry Pi用のFishインストールが完了しました。"
+            return 0
+        fi
+    fi
+    
+    # 標準リポジトリで失敗した場合、openSUSE Build Serviceを試行
+    log_warn "標準リポジトリからのインストールに失敗しました。openSUSE Build Serviceを試行します..."
     
     local debian_version
     debian_version=$(cat /etc/debian_version | cut -d'.' -f1)
@@ -200,33 +229,54 @@ install_fish_raspberrypi() {
     fi
     
     log_info "openSUSE Build ServiceからFishをインストールしています..."
-    echo "deb http://download.opensuse.org/repositories/shells:/fish:/release:/3/Debian_${debian_version}/ /" | sudo tee /etc/apt/sources.list.d/shells:fish:release:3.list
+    echo "deb http://download.opensuse.org/repositories/shells:/fish:/release:/3/Debian_${debian_version}/ /" | sudo tee /etc/apt/sources.list.d/shells:fish:release:3.list > /dev/null
     
-    curl -fsSL "https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}/Release.key" | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null || {
+    if ! curl -fsSL "https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}/Release.key" | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null; then
         log_error "GPGキーの追加に失敗しました。"
         return 1
-    }
+    fi
     
-    sudo apt update || {
+    if ! sudo apt update; then
         log_error "パッケージリストの更新に失敗しました。"
         return 1
-    }
+    fi
     
-    sudo apt install fish -y || {
-        log_error "fishのインストールに失敗しました。"
+    if ! sudo apt install fish -y; then
+        log_error "openSUSEリポジトリからのfishインストールにも失敗しました。"
+        log_error "手動でのインストールをお試しください:"
+        log_error "  1. sudo apt update"
+        log_error "  2. sudo apt install fish"
         return 1
-    }
+    fi
+    
+    # インストール後にfishが正しく利用可能か確認
+    if ! command -v fish &> /dev/null; then
+        log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
+        log_error "PATHの更新が必要な可能性があります。以下を実行してください:"
+        log_error "  1. 新しいターミナルセッションを開く"
+        log_error "  2. または、source ~/.bashrc を実行"
+        log_error "  3. fish --version で確認"
+        return 1
+    fi
     
     log_success "Raspberry Pi用のFishインストールが完了しました。"
 }
 
 # Fish パス取得と検証
 get_fish_path() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "/usr/bin/fish"  # ドライラン用のダミーパス
+        return 0
+    fi
+    
     local fish_path
     fish_path=$(command -v fish 2>/dev/null)
     
     if [[ -z "$fish_path" ]]; then
-        log_error "fishのインストールに失敗しました。fishコマンドが見つかりません。"
+        log_error "fishコマンドが見つかりません。"
+        log_error "fishのインストールが完了していない可能性があります。"
+        log_error "新しいターミナルセッションを開いて再実行するか、以下を実行してください:"
+        log_error "  source ~/.bashrc  # または source ~/.profile"
         return 1
     fi
     
@@ -262,13 +312,14 @@ add_fish_to_shells() {
 # デフォルトシェルの変更
 change_default_shell() {
     local fish_path="$1"
-    local current_shell
-    current_shell=$(getent passwd "$USER" | cut -d: -f7)
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] デフォルトシェルをfishに変更する予定: $fish_path"
         return 0
     fi
+    
+    local current_shell
+    current_shell=$(getent passwd "$USER" | cut -d: -f7)
     
     if [[ "$current_shell" == "$fish_path" ]]; then
         log_info "デフォルトシェルは既にfishに設定されています。"
@@ -451,6 +502,7 @@ main() {
     check_dependencies
     
     # OS検出
+    log_info "OSの検出を行っています..."
     os_type=$(detect_os)
     log_success "検出されたOS: $os_type"
     
