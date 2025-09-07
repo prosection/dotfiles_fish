@@ -175,10 +175,30 @@ curl -sL -o ~/.config/fish/functions/fisher.fish https://raw.githubusercontent.c
 fish -c "source ~/.config/fish/functions/fisher.fish && fisher install jorgebucaran/fisher"
 ```
 
-#### 5. テーマが正しく表示されない
+#### 5. 関連パッケージ（exa、bat、peco等）がインストールされない
+```bash
+# Raspberry Pi用の手動インストール
+sudo apt update
+sudo apt install neovim exa bat peco duf xsel -y
+
+# 代替パッケージ（一部が利用できない場合）
+sudo apt install vim lsd batcat -y
+
+# 個別インストール
+sudo apt install neovim -y  # エディタ
+sudo apt install exa -y     # ls改良版（または lsd）
+sudo apt install bat -y     # cat改良版（または batcat）
+sudo apt install peco -y    # インタラクティブフィルタ
+sudo apt install duf -y     # df改良版
+```
+
+#### 6. テーマが正しく表示されない
 ```bash
 # Nerd Fontsをインストール
 # 各OS向けの手順はこちら: https://www.nerdfonts.com/
+
+# Ubuntu/Raspberry Pi
+sudo apt install fonts-firacode fonts-powerline -y
 ```
 
 ### 設定の復元

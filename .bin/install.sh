@@ -179,77 +179,110 @@ install_fish_ubuntu() {
     }
     
     log_info "fishと関連パッケージをインストールしています..."
-    sudo apt install fish git curl peco neovim fontconfig exa duf bat xsel -y || {
-        log_error "パッケージのインストールに失敗しました。"
-        return 1
-    }
     
-    # インストール後にfishが正しく利用可能か確認
+    # まずfish本体をインストール
+    if ! sudo apt install fish -y; then
+        log_error "fishのインストールに失敗しました。"
+        return 1
+    fi
+    
+    # fishインストール後の確認
     if ! command -v fish &> /dev/null; then
         log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
         log_error "PATHの更新が必要な可能性があります。新しいターミナルセッションで再試行してください。"
         return 1
     fi
     
-    log_success "Ubuntu/Debian用のFishインストールが完了しました。"
+    # 関連パッケージを個別にインストール（失敗を許容）
+    local essential_packages=("git" "curl" "fontconfig")
+    local optional_packages=("peco" "neovim" "exa" "duf" "bat" "xsel")
+    
+    # 必須パッケージ
+    for package in "${essential_packages[@]}"; do
+        if sudo apt install "$package" -y; then
+            log_success "$package のインストールが完了しました。"
+        else
+            log_warn "$package のインストールに失敗しました（必須パッケージ）。"
+        fi
+    done
+    
+    # オプションパッケージ
+    local installed_optional=0
+    local total_optional=${#optional_packages[@]}
+    
+    for package in "${optional_packages[@]}"; do
+        if sudo apt install "$package" -y 2>/dev/null; then
+            log_success "$package のインストールが完了しました。"
+            ((installed_optional++))
+        else
+            log_warn "$package のインストールに失敗しました（オプションパッケージ）。"
+        fi
+    done
+    
+    log_success "fishのインストールが完了しました。"
+    if [[ $installed_optional -gt 0 ]]; then
+        log_success "関連パッケージ ($installed_optional/$total_optional) がインストールされました。"
+    else
+        log_warn "関連パッケージのインストールに失敗しましたが、fish shell は利用可能です。"
+    fi
+    
+    log_success "Ubuntu/Debian用のFishと関連パッケージのセットアップが完了しました。"
 }
 
 # Raspberry Pi用インストール関数
 install_fish_raspberrypi() {
-    log_info "Raspberry Pi用のFishインストールを開始します..."
+    log_info "Raspberry Pi用のFishと関連ツールのインストールを開始します..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Fishのインストールを実行する予定（標準リポジトリまたはopenSUSEリポジトリ）"
+        log_info "[DRY RUN] Fishと関連パッケージのインストールを実行する予定（標準リポジトリまたはopenSUSEリポジトリ）"
         return 0
     fi
     
-    # まず標準リポジトリからのインストールを試行
-    log_info "標準リポジトリからFishのインストールを試行しています..."
+    # パッケージリストを更新
+    log_info "パッケージリストを更新しています..."
     sudo apt update
+    
+    # まず標準リポジトリからfishのインストールを試行
+    log_info "標準リポジトリからFishのインストールを試行しています..."
+    local fish_installed=false
     
     if sudo apt install fish -y 2>/dev/null; then
         log_success "標準リポジトリからのFishインストールが完了しました。"
+        fish_installed=true
+    else
+        log_warn "標準リポジトリからのインストールに失敗しました。openSUSE Build Serviceを試行します..."
         
-        # インストール後にfishが正しく利用可能か確認
-        if command -v fish &> /dev/null; then
-            log_success "Raspberry Pi用のFishインストールが完了しました。"
-            return 0
+        local debian_version
+        debian_version=$(cat /etc/debian_version | cut -d'.' -f1)
+        
+        if [[ -z "$debian_version" ]]; then
+            log_error "Debianバージョンの取得に失敗しました。"
+            return 1
+        fi
+        
+        log_info "openSUSE Build ServiceからFishをインストールしています..."
+        echo "deb http://download.opensuse.org/repositories/shells:/fish:/release:/3/Debian_${debian_version}/ /" | sudo tee /etc/apt/sources.list.d/shells:fish:release:3.list > /dev/null
+        
+        if ! curl -fsSL "https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}/Release.key" | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null; then
+            log_error "GPGキーの追加に失敗しました。"
+            return 1
+        fi
+        
+        if ! sudo apt update; then
+            log_error "パッケージリストの更新に失敗しました。"
+            return 1
+        fi
+        
+        if sudo apt install fish -y; then
+            log_success "openSUSE Build ServiceからのFishインストールが完了しました。"
+            fish_installed=true
+        else
+            log_error "すべてのfishインストール方法が失敗しました。"
+            return 1
         fi
     fi
     
-    # 標準リポジトリで失敗した場合、openSUSE Build Serviceを試行
-    log_warn "標準リポジトリからのインストールに失敗しました。openSUSE Build Serviceを試行します..."
-    
-    local debian_version
-    debian_version=$(cat /etc/debian_version | cut -d'.' -f1)
-    
-    if [[ -z "$debian_version" ]]; then
-        log_error "Debianバージョンの取得に失敗しました。"
-        return 1
-    fi
-    
-    log_info "openSUSE Build ServiceからFishをインストールしています..."
-    echo "deb http://download.opensuse.org/repositories/shells:/fish:/release:/3/Debian_${debian_version}/ /" | sudo tee /etc/apt/sources.list.d/shells:fish:release:3.list > /dev/null
-    
-    if ! curl -fsSL "https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}/Release.key" | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null; then
-        log_error "GPGキーの追加に失敗しました。"
-        return 1
-    fi
-    
-    if ! sudo apt update; then
-        log_error "パッケージリストの更新に失敗しました。"
-        return 1
-    fi
-    
-    if ! sudo apt install fish -y; then
-        log_error "openSUSEリポジトリからのfishインストールにも失敗しました。"
-        log_error "手動でのインストールをお試しください:"
-        log_error "  1. sudo apt update"
-        log_error "  2. sudo apt install fish"
-        return 1
-    fi
-    
-    # インストール後にfishが正しく利用可能か確認
+    # fishインストール後の確認
     if ! command -v fish &> /dev/null; then
         log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
         log_error "PATHの更新が必要な可能性があります。以下を実行してください:"
@@ -259,7 +292,81 @@ install_fish_raspberrypi() {
         return 1
     fi
     
-    log_success "Raspberry Pi用のFishインストールが完了しました。"
+    # 関連パッケージのインストール（個別処理で失敗を許容）
+    log_info "Raspberry Pi用関連パッケージをインストールしています..."
+    
+    # 必須パッケージ（エラー時は警告のみ）
+    local essential_packages=("git" "curl" "fontconfig")
+    local optional_packages=("neovim" "exa" "bat" "duf" "peco" "xsel")
+    
+    # 必須パッケージのインストール
+    for package in "${essential_packages[@]}"; do
+        if sudo apt install "$package" -y; then
+            log_success "$package のインストールが完了しました。"
+        else
+            log_warn "$package のインストールに失敗しました（必須パッケージ）。"
+        fi
+    done
+    
+    # オプションパッケージのインストール（失敗を許容）
+    local installed_optional=0
+    local total_optional=${#optional_packages[@]}
+    
+    for package in "${optional_packages[@]}"; do
+        if sudo apt install "$package" -y 2>/dev/null; then
+            log_success "$package のインストールが完了しました。"
+            ((installed_optional++))
+        else
+            # Raspberry Pi特有の代替パッケージを試行
+            case "$package" in
+                "exa")
+                    if sudo apt install exa -y 2>/dev/null || sudo apt install lsd -y 2>/dev/null; then
+                        log_success "exa (または代替パッケージ) のインストールが完了しました。"
+                        ((installed_optional++))
+                    else
+                        log_warn "exa のインストールに失敗しました（ls コマンドを使用してください）。"
+                    fi
+                    ;;
+                "bat")
+                    if sudo apt install bat -y 2>/dev/null || sudo apt install batcat -y 2>/dev/null; then
+                        log_success "bat (または batcat) の���ンストールが完了しました。"
+                        ((installed_optional++))
+                    else
+                        log_warn "bat のインストールに失敗しました（cat コマンドを使用してください）。"
+                    fi
+                    ;;
+                "neovim")
+                    if sudo apt install neovim -y 2>/dev/null || sudo apt install vim -y 2>/dev/null; then
+                        log_success "neovim (または vim) のインストールが完了しました。"
+                        ((installed_optional++))
+                    else
+                        log_warn "neovim のインストールに失敗しました（nano エディタを使用してください）。"
+                    fi
+                    ;;
+                *)
+                    log_warn "$package のインストールに失敗しました（オプションパッケージ）。"
+                    ;;
+            esac
+        fi
+    done
+    
+    # インストール結果のサマリー
+    log_success "Fish shell のインストールが完了しました。"
+    if [[ $installed_optional -gt 0 ]]; then
+        log_success "関連パッケージ ($installed_optional/$total_optional) がインストールされました。"
+    else
+        log_warn "関連パッケージのインストールに失敗しましたが、Fish shell は利用可能です。"
+    fi
+    
+    # 手動インストールの案内
+    if [[ $installed_optional -lt $total_optional ]]; then
+        log_info "不足しているパッケージは後で手動でインストールできます:"
+        log_info "  sudo apt install neovim exa bat peco"
+        log_info "または代替パッケージ:"
+        log_info "  sudo apt install vim lsd batcat"
+    fi
+    
+    log_success "Raspberry Pi用のFishと関連ツールのセットアップが完了しました。"
 }
 
 # Fish パス取得と検証
