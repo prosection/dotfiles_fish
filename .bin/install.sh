@@ -361,24 +361,87 @@ install_fisher_and_plugins() {
     fi
     
     log_info "fisherをインストールしています..."
-    fish -c "curl -sL git.io/fisher | source && fisher update" || {
-        log_error "fisherのインストールに失敗しました。"
+    
+    # 最新のfisherインストール方法を使用（複数の方法を試行）
+    local fisher_installed=false
+    
+    # 方法1: 最新の公式URL (推奨)
+    if fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher" 2>/dev/null; then
+        log_success "最新のfisherインストールが完了しました。"
+        fisher_installed=true
+    else
+        log_warn "最新のfisher URLからのインストールに失敗しました。代替方法を試行します..."
+        
+        # 方法2: 手動ダウンロード方式
+        fish -c "
+            mkdir -p ~/.config/fish/functions
+            curl -sL -o ~/.config/fish/functions/fisher.fish https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish
+            source ~/.config/fish/functions/fisher.fish
+            fisher install jorgebucaran/fisher
+        " 2>/dev/null && {
+            log_success "手動ダウンロード方式でfisherインストールが完了しました。"
+            fisher_installed=true
+        } || {
+            log_warn "手動ダウンロード方式も失敗しました。古いURLを試行します..."
+            
+            # 方法3: 古いURL（フォールバック）
+            fish -c "curl -sL git.io/fisher | source && fisher update" 2>/dev/null && {
+                log_success "古いfisher URLでインストールが完了しました。"
+                fisher_installed=true
+            } || {
+                log_error "すべてのfisherインストール方法が失敗しました。"
+                log_error "手動でfisherをインストールしてください:"
+                log_error "  1. curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish -o ~/.config/fish/functions/fisher.fish"
+                log_error "  2. fish"
+                log_error "  3. fisher install jorgebucaran/fisher"
+                return 1
+            }
+        }
+    fi
+    
+    if [[ "$fisher_installed" != "true" ]]; then
         return 1
-    }
+    fi
+    
+    # fisherがインストールされているか確認
+    if ! fish -c "functions -q fisher" 2>/dev/null; then
+        log_error "fisherのインストールは実行されましたが、fisher関数が見つかりません。"
+        log_error "fish shellを再起動してから再実行してください。"
+        return 1
+    fi
     
     log_info "fisherプラグインをインストールしています..."
     
     # プラグインを一つずつインストールしてエラーハンドリング
     local plugins=("oh-my-fish/theme-bobthefish" "oh-my-fish/plugin-peco")
+    local plugin_success=0
+    local plugin_total=${#plugins[@]}
+    
     for plugin in "${plugins[@]}"; do
         log_info "プラグインをインストール中: $plugin"
-        fish -c "fisher install $plugin" || {
+        if fish -c "fisher install $plugin" 2>/dev/null; then
+            log_success "プラグイン $plugin のインストールが完了しました。"
+            ((plugin_success++))
+        else
             log_warn "プラグインのインストールに失敗しました: $plugin"
             log_warn "このプラグインをスキップして続行します。"
-        }
+            # ネットワークの問題の可能性を示唆
+            log_warn "ネットワーク接続やGitHubアクセスを確認してください。"
+        fi
     done
     
-    log_success "fisherとプラグインのインストールが完了しました。"
+    if [[ $plugin_success -eq $plugin_total ]]; then
+        log_success "すべてのfisherプラグインのインストールが完了しました。"
+    elif [[ $plugin_success -gt 0 ]]; then
+        log_warn "fisherプラグインの一部（$plugin_success/$plugin_total）がインストールされました。"
+    else
+        log_warn "fisherプラグインのインストールに失敗しましたが、fisher自体は使用可能です。"
+        log_warn "後で手動でプラグインをインストールできます:"
+        log_warn "  fisher install oh-my-fish/theme-bobthefish"
+        log_warn "  fisher install oh-my-fish/plugin-peco"
+    fi
+    
+    log_success "fisherとプラグインのセットアップが完了しました。"
 }
 
 # fish設定ファイルの作成
@@ -422,20 +485,37 @@ abbr gp "git push"
 abbr gl "git log --oneline"
 abbr gd "git diff"
 
-# Theme settings (bobthefish)
+# Theme settings (bobthefish theme)
+# Note: テーマが正しく表示されない場合は、以下を実行してください:
+#   fisher install oh-my-fish/theme-bobthefish
 set -g theme_display_date yes
 set -g theme_date_format "+%F %H:%M"
 set -g theme_display_git_default_branch yes
 set -g theme_color_scheme dark
 set -g theme_nerd_fonts yes
 
-# Peco settings
+# Peco settings (for history search)
+# Note: pecoが動作しない場合は、以下を実行してください:
+#   fisher install oh-my-fish/plugin-peco
 set fish_plugins theme peco
 
 # Key bindings
 function fish_user_key_bindings
-    bind \cr peco_select_history  # Ctrl+r でヒストリ検索
+    # Ctrl+r でヒストリ検索 (peco使用)
+    # pecoが利用できない場合は、fish標準のCtrl+rを使用
+    if command -q peco
+        bind \cr peco_select_history
+    else
+        # 標準のfish履歴検索にフォールバック
+        bind \cr history-search-backward
+    end
 end
+
+# Fisher plugin management commands (参考)
+# fisher list                    # インストール済みプラグインを表示
+# fisher install <plugin>        # プラグインをインストール
+# fisher remove <plugin>         # プラグインを削除
+# fisher update                  # すべてのプラグインを更新
 
 # Environment variables
 set -gx EDITOR nvim

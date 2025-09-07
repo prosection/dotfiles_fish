@@ -156,12 +156,23 @@ sudo chsh -s $(which fish) $USER
 exec fish
 ```
 
-#### 4. プラグインのインストールに失敗
+#### 4. Fisher/プラグインのインストールに失敗
 ```bash
-# Fisherを手動で再インストール
-curl -sL git.io/fisher | source && fisher update
+# 最新のFisherを手動でインストール（推奨）
+curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source
+fisher install jorgebucaran/fisher
+
+# プラグインを手動でインストール
 fisher install oh-my-fish/theme-bobthefish
 fisher install oh-my-fish/plugin-peco
+
+# 古いURL（フォールバック）
+curl -sL git.io/fisher | source && fisher update
+
+# 手動ダウンロード方式
+mkdir -p ~/.config/fish/functions
+curl -sL -o ~/.config/fish/functions/fisher.fish https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish
+fish -c "source ~/.config/fish/functions/fisher.fish && fisher install jorgebucaran/fisher"
 ```
 
 #### 5. テーマが正しく表示されない
@@ -252,6 +263,19 @@ A: 推奨しません。一般ユーザーで実行し、必要時のみsudoを�
 
 ### Q: Fish以外のシェルでも動作しますか？
 A: このスクリプトはFish専用です。Bash/Zshでは動作しません。
+
+### Q: fisherやプラグインのインストールに失敗します
+A: 複数の原因が考えられます：
+- **ネットワーク問題**: GitHubへのアクセスが制限されている
+- **Fisher URL変更**: 最新のインストール方法を使用してください
+- **手動解決**: `fisher install oh-my-fish/theme-bobthefish` で個別インストール
+- **代替ツール**: oh-my-fish (omf) の使用も検討してください
+
+### Q: テーマが表示されないか文字化けします
+A: Nerd Fonts のインストールが必要です：
+- macOS: `brew tap homebrew/cask-fonts && brew install font-hack-nerd-font`
+- Ubuntu: `sudo apt install fonts-firacode fonts-powerline`
+- 手動: https://www.nerdfonts.com/ からダウンロード
 
 ## 🤝 コントリビューション
 
