@@ -4,7 +4,7 @@
 # Fish Shell Dotfiles Installation Script
 # ==============================================================================
 # このスクリプトはFish shellの自動インストールと設定を行います。
-# 対応OS: macOS, Ubuntu/Debian, Raspberry Pi
+# 対応OS: macOS, Ubuntu/Debian, Raspberry Pi (Zero 2 W含む)
 # ==============================================================================
 
 set -e  # エラー時に即座に終了
@@ -21,6 +21,7 @@ readonly LOG_FILE="/tmp/fish_install_${USER}.log"
 DRY_RUN=${DRY_RUN:-false}
 AUTO_YES=${AUTO_YES:-false}
 VERBOSE=${VERBOSE:-false}
+SKIP_SHELL_CHANGE=${SKIP_SHELL_CHANGE:-false}
 
 # カラー出力用
 readonly RED='\033[0;31m'
@@ -63,6 +64,11 @@ cleanup() {
     local exit_code=$?
     log_debug "クリーンアップを実行中..."
 
+    # sudo更新プロセスの停止
+    if [[ -n "${SUDO_REFRESH_PID:-}" ]]; then
+        kill "$SUDO_REFRESH_PID" 2>/dev/null || true
+    fi
+
     # ロックファイルの削除
     if [[ -f "$LOCK_FILE" ]]; then
         rm -f "$LOCK_FILE"
@@ -70,13 +76,14 @@ cleanup() {
 
     # 一時ファイルの削除
     rm -f /tmp/fish_install_*.tmp 2>/dev/null || true
+    rm -f /tmp/fish_opensuse_*.key 2>/dev/null || true
+    rm -f /tmp/eza_gierens_*.gpg 2>/dev/null || true
+    rm -f /tmp/homebrew_install_*.sh 2>/dev/null || true
 
     if [[ $exit_code -ne 0 ]]; then
         log_error "スクリプトがエラーコード $exit_code で終了しました。"
         log_error "詳細はログファイルを確認してください: $LOG_FILE"
     fi
-
-    exit $exit_code
 }
 
 # エラーハンドリング関数
@@ -85,6 +92,7 @@ handle_error() {
     local error_code=${2:-1}
     log_error "スクリプトの実行中にエラーが発生しました。行: $line_no, エラーコード: $error_code"
     log_error "実行を中止します。"
+    cleanup
     exit "$error_code"
 }
 
@@ -114,21 +122,51 @@ show_usage() {
 使用方法: $SCRIPT_NAME [オプション]
 
 オプション:
-  -h, --help      この使用方法を表示
-  --dry-run       実際にインストールせずに実行予定の処理を表示
-  -y, --yes       確認プロンプトをスキップ
-  -v, --verbose   詳細なデバッグ出力を表示
+  -h, --help           この使用方法を表示
+  --dry-run            実際にインストールせずに実行予定の処理を表示
+  -y, --yes            確認プロンプトをスキップ
+  -v, --verbose        詳細なデバッグ出力を表示
+  --skip-shell-change  デフォルトシェルの変更をスキップ
 
 環境変数:
-  DRY_RUN=true    ドライランモードで実行
-  VERBOSE=true    詳細モードで実行
+  DRY_RUN=true         ドライランモードで実行
+  VERBOSE=true         詳細モードで実行
+  SKIP_SHELL_CHANGE=true  シェル変更をスキップ
 
 例:
-  $SCRIPT_NAME            # 通常のインストール
-  $SCRIPT_NAME --dry-run  # ドライランモード
-  $SCRIPT_NAME -y         # 確認をスキップしてインストール
-  $SCRIPT_NAME -v         # 詳細モードでインストール
+  $SCRIPT_NAME                    # 通常のインストール
+  $SCRIPT_NAME --dry-run          # ドライランモード
+  $SCRIPT_NAME -y                 # 確認をスキップしてインストール
+  $SCRIPT_NAME --skip-shell-change  # シェル変更なしでインストール
 EOF
+}
+
+# システム情報の収集
+collect_system_info() {
+    log_info "システム情報を収集しています..."
+
+    echo "=== System Information ===" >> "$LOG_FILE"
+    echo "Date: $(date)" >> "$LOG_FILE"
+    echo "Hostname: $(hostname)" >> "$LOG_FILE"
+    echo "User: $USER" >> "$LOG_FILE"
+    echo "OSTYPE: ${OSTYPE:-unknown}" >> "$LOG_FILE"
+    echo "uname -a: $(uname -a)" >> "$LOG_FILE"
+    echo "uname -m: $(uname -m)" >> "$LOG_FILE"
+
+    if [[ -f /etc/os-release ]]; then
+        echo "--- /etc/os-release ---" >> "$LOG_FILE"
+        cat /etc/os-release >> "$LOG_FILE"
+    fi
+
+    if command -v dpkg &>/dev/null; then
+        echo "dpkg --print-architecture: $(dpkg --print-architecture 2>/dev/null || echo 'N/A')" >> "$LOG_FILE"
+    fi
+
+    if [[ -f /proc/device-tree/model ]]; then
+        echo "Device Model: $(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo 'N/A')" >> "$LOG_FILE"
+    fi
+
+    echo "===========================" >> "$LOG_FILE"
 }
 
 # 依存関係チェック関数
@@ -143,9 +181,19 @@ check_dependencies() {
     done
 
     if [[ ${#missing_commands[@]} -gt 0 ]]; then
-        log_error "以下のコマンドが見つかりません: ${missing_commands[*]}"
-        log_error "これらのコマンドをインストールしてから再実行してください。"
-        exit 1
+        log_warn "以下のコマンドが見つかりません: ${missing_commands[*]}"
+        log_info "必要なパッケージをインストールしています..."
+
+        if command -v apt &>/dev/null; then
+            sudo apt update
+            sudo apt install -y curl git || {
+                log_error "依存パッケージのインストールに失敗しました。"
+                exit 1
+            }
+        else
+            log_error "これらのコマンドを手動でインストールしてから再実行してください。"
+            exit 1
+        fi
     fi
 
     log_success "依存関係の確認が完了しました。"
@@ -164,19 +212,32 @@ check_sudo() {
     fi
 
     # sudo のタイムアウトを延長（バックグラウンドで定期的に更新）
-    (while true; do sudo -n true; sleep 50; done) &
+    (while true; do sudo -n true; sleep 50; done 2>/dev/null) &
     SUDO_REFRESH_PID=$!
     log_debug "sudo更新プロセス開始: PID $SUDO_REFRESH_PID"
 
     log_success "sudo権限の確認が完了しました。"
 }
 
-# sudo更新プロセスの停止
-stop_sudo_refresh() {
-    if [[ -n "${SUDO_REFRESH_PID:-}" ]]; then
-        kill "$SUDO_REFRESH_PID" 2>/dev/null || true
-        log_debug "sudo更新プロセス停止: PID $SUDO_REFRESH_PID"
-    fi
+# アーキテクチャ検出
+detect_architecture() {
+    local arch
+    arch=$(uname -m)
+
+    case "$arch" in
+        x86_64)
+            echo "amd64"
+            ;;
+        aarch64)
+            echo "arm64"
+            ;;
+        armv7l|armv6l)
+            echo "armhf"
+            ;;
+        *)
+            echo "$arch"
+            ;;
+    esac
 }
 
 # OS検出関数
@@ -185,7 +246,7 @@ detect_os() {
 
     if [[ "$OSTYPE" == "darwin"* ]]; then
         os_type="macos"
-    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "linux"* ]]; then
         if [[ -f /etc/debian_version ]]; then
             # Raspberry Pi の堅牢な検出（NULLバイト対策）
             if [[ -f /etc/rpi-issue ]]; then
@@ -199,20 +260,8 @@ detect_os() {
                 fi
             else
                 # Ubuntu と Debian を区別
-                if command -v lsb_release &>/dev/null; then
-                    local distro
-                    distro=$(lsb_release -is 2>/dev/null || echo "")
-                    case "$distro" in
-                        Ubuntu)
-                            os_type="ubuntu"
-                            ;;
-                        Debian)
-                            os_type="debian"
-                            ;;
-                        *)
-                            os_type="debian"
-                            ;;
-                    esac
+                if [[ -f /etc/lsb-release ]] && grep -q "Ubuntu" /etc/lsb-release 2>/dev/null; then
+                    os_type="ubuntu"
                 else
                     os_type="debian"
                 fi
@@ -223,6 +272,32 @@ detect_os() {
     fi
 
     echo "$os_type"
+}
+
+# Debianバージョン検出
+detect_debian_version() {
+    local version=""
+
+    if [[ -f /etc/debian_version ]]; then
+        # バージョン番号を取得 (例: 12.0 -> 12)
+        version=$(cut -d'.' -f1 < /etc/debian_version 2>/dev/null || echo "")
+
+        # コードネームからも判別を試行
+        if [[ -z "$version" ]] || ! [[ "$version" =~ ^[0-9]+$ ]]; then
+            if [[ -f /etc/os-release ]]; then
+                local codename
+                codename=$(grep "VERSION_CODENAME" /etc/os-release 2>/dev/null | cut -d'=' -f2 || echo "")
+                case "$codename" in
+                    bookworm) version="12" ;;
+                    bullseye) version="11" ;;
+                    buster)   version="10" ;;
+                    *)        version="" ;;
+                esac
+            fi
+        fi
+    fi
+
+    echo "$version"
 }
 
 # 安全なcurlダウンロード関数
@@ -298,13 +373,6 @@ install_fish_macos() {
         brew install "$pkg" 2>/dev/null || log_warn "$pkg のインストールに失敗しました（オプション）"
     done
 
-    # インストール後にfishが正しく利用可能か確認
-    if ! command -v fish &> /dev/null; then
-        log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
-        log_error "PATHの更新が必要な可能性があります。新しいターミナルセッションで再試行してください。"
-        return 1
-    fi
-
     log_success "macOS用のFishインストールが完了しました。"
 }
 
@@ -317,16 +385,31 @@ install_eza_debian() {
         return 0
     fi
 
+    # アーキテクチャを確認
+    local arch
+    arch=$(detect_architecture)
+    log_debug "検出されたアーキテクチャ: $arch"
+
+    # armhf は eza のバイナリがない場合がある
+    if [[ "$arch" == "armhf" ]]; then
+        log_warn "armhf アーキテクチャでは eza が利用できない可能性があります。"
+        log_info "代わりに標準の ls を使用します。"
+        return 1
+    fi
+
     # GPGキーディレクトリの作成
     sudo mkdir -p /etc/apt/keyrings
 
     # GPGキーのダウンロードと追加
     local gpg_key_file="/tmp/eza_gierens_$$.gpg"
     if safe_curl "https://raw.githubusercontent.com/eza-community/eza/main/deb.asc" "$gpg_key_file"; then
+        # 既存のキーを削除
+        sudo rm -f /etc/apt/keyrings/gierens.gpg
+
         sudo gpg --dearmor -o /etc/apt/keyrings/gierens.gpg < "$gpg_key_file" 2>/dev/null || {
-            # 既存のキーがある場合は削除して再作成
-            sudo rm -f /etc/apt/keyrings/gierens.gpg
-            sudo gpg --dearmor -o /etc/apt/keyrings/gierens.gpg < "$gpg_key_file"
+            log_warn "GPGキーの追加に失敗しました。"
+            rm -f "$gpg_key_file"
+            return 1
         }
         rm -f "$gpg_key_file"
 
@@ -338,8 +421,7 @@ install_eza_debian() {
         sudo chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
 
         # パッケージリストの更新とインストール
-        sudo apt update
-        if sudo apt install -y eza; then
+        if sudo apt update 2>/dev/null && sudo apt install -y eza 2>/dev/null; then
             log_success "ezaのインストールが完了しました。"
             return 0
         fi
@@ -377,19 +459,13 @@ install_fish_ubuntu() {
             sudo apt-add-repository ppa:fish-shell/release-3 -y 2>/dev/null || {
                 log_warn "Fish PPAの追加に失敗しました。標準リポジトリを使用します。"
             }
-            sudo apt update
+            sudo apt update 2>/dev/null || true
         fi
     fi
 
     log_info "fishをインストールしています..."
     if ! sudo apt install -y fish; then
         log_error "fishのインストールに失敗しました。"
-        return 1
-    fi
-
-    # fishインストール後の確認
-    if ! command -v fish &> /dev/null; then
-        log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
         return 1
     fi
 
@@ -432,45 +508,78 @@ install_fish_raspberrypi() {
         return 0
     fi
 
+    local arch
+    arch=$(detect_architecture)
+    log_info "検出されたアーキテクチャ: $arch"
+
+    local debian_version
+    debian_version=$(detect_debian_version)
+    log_info "検出されたDebianバージョン: ${debian_version:-不明}"
+
     log_info "パッケージリストを更新しています..."
-    sudo apt update
+    sudo apt update || {
+        log_warn "パッケージリストの更新に警告がありました。続行します..."
+    }
 
     # まず標準リポジトリからfishのインストールを試行
     log_info "標準リポジトリからFishのインストールを試行しています..."
     local fish_installed=false
 
-    if sudo apt install -y fish 2>/dev/null; then
-        log_success "標準リポジトリからのFishインストールが完了しました。"
-        fish_installed=true
-    else
-        log_warn "標準リポジトリからのインストールに失敗しました。openSUSE Build Serviceを試行します..."
+    if sudo apt install -y fish 2>&1 | tee -a "$LOG_FILE"; then
+        # インストール後に実際に存在するか確認
+        if dpkg -l fish 2>/dev/null | grep -q "^ii"; then
+            log_success "標準リポジトリからのFishインストールが完了しました。"
+            fish_installed=true
+        fi
+    fi
 
-        local debian_version
-        debian_version=$(cut -d'.' -f1 < /etc/debian_version 2>/dev/null || echo "")
+    if [[ "$fish_installed" != "true" ]]; then
+        log_warn "標準リポジトリからのインストールに失敗しました。"
+
+        # Bookworm (Debian 12) 以降は標準リポジトリにfishがある
+        if [[ -n "$debian_version" ]] && [[ "$debian_version" -ge 12 ]]; then
+            log_error "Debian $debian_version の標準リポジトリからのfishインストールに失敗しました。"
+            log_error "以下を手動で試してください:"
+            log_error "  sudo apt update"
+            log_error "  sudo apt install -y fish"
+            return 1
+        fi
+
+        log_info "openSUSE Build Serviceからのインストールを試行します..."
 
         if [[ -z "$debian_version" ]]; then
             log_error "Debianバージョンの取得に失敗しました。"
+            log_error "手動で以下を試してください: sudo apt install fish"
             return 1
         fi
-
-        log_info "openSUSE Build ServiceからFishをインストールしています..."
 
         # GPGキーの取得と検証
         local gpg_key_file="/tmp/fish_opensuse_$$.key"
-        if ! safe_curl "https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}/Release.key" "$gpg_key_file"; then
+        local repo_url="https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}"
+
+        log_debug "リポジトリURL: $repo_url"
+
+        if ! safe_curl "${repo_url}/Release.key" "$gpg_key_file" 30; then
             log_error "GPGキーのダウンロードに失敗しました。"
+            log_error "URL: ${repo_url}/Release.key"
+            rm -f "$gpg_key_file"
             return 1
         fi
 
-        gpg --dearmor < "$gpg_key_file" | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null
+        # GPGキーの追加
+        sudo rm -f /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg
+        if ! gpg --dearmor < "$gpg_key_file" 2>/dev/null | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null; then
+            log_error "GPGキーの変換に失敗しました。"
+            rm -f "$gpg_key_file"
+            return 1
+        fi
         rm -f "$gpg_key_file"
 
-        echo "deb http://download.opensuse.org/repositories/shells:/fish:/release:/3/Debian_${debian_version}/ /" | \
-            sudo tee /etc/apt/sources.list.d/shells:fish:release:3.list > /dev/null
+        # リポジトリの追加
+        echo "deb ${repo_url}/ /" | sudo tee /etc/apt/sources.list.d/shells_fish_release_3.list > /dev/null
 
         if ! sudo apt update; then
-            log_error "パッケージリストの更新に失敗しました。"
-            return 1
+            log_warn "パッケージリストの更新に警告がありました。"
         fi
 
         if sudo apt install -y fish; then
@@ -480,12 +589,6 @@ install_fish_raspberrypi() {
             log_error "すべてのfishインストール方法が失敗しました。"
             return 1
         fi
-    fi
-
-    # fishインストール後の確認
-    if ! command -v fish &> /dev/null; then
-        log_error "fishのインストールは完了しましたが、fishコマンドが見つかりません。"
-        return 1
     fi
 
     # eza のインストール試行
@@ -498,7 +601,7 @@ install_fish_raspberrypi() {
     done
 
     # オプションパッケージ（Raspberry Pi用に最適化）
-    local optional_packages=("fzf" "bat" "fd-find")
+    local optional_packages=("fzf")
     for package in "${optional_packages[@]}"; do
         sudo apt install -y "$package" 2>/dev/null || log_warn "$package のインストールに失敗しました（オプション）。"
     done
@@ -506,27 +609,89 @@ install_fish_raspberrypi() {
     log_success "Raspberry Pi用のFishインストールが完了しました。"
 }
 
-# Fish パス取得と検証
+# Fish パス取得と検証（複数の場所を確認）
 get_fish_path() {
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "/usr/bin/fish"
         return 0
     fi
 
-    local fish_path
-    fish_path=$(command -v fish 2>/dev/null || echo "")
+    local fish_path=""
+
+    # 複数の場所を確認
+    local possible_paths=(
+        "/usr/bin/fish"
+        "/usr/local/bin/fish"
+        "/opt/homebrew/bin/fish"
+        "/bin/fish"
+    )
+
+    # まず which で検索
+    fish_path=$(which fish 2>/dev/null || echo "")
+
+    if [[ -z "$fish_path" ]] || [[ ! -x "$fish_path" ]]; then
+        # 既知のパスを順番に確認
+        for path in "${possible_paths[@]}"; do
+            if [[ -x "$path" ]]; then
+                fish_path="$path"
+                break
+            fi
+        done
+    fi
 
     if [[ -z "$fish_path" ]]; then
+        # dpkg で確認
+        if command -v dpkg &>/dev/null; then
+            fish_path=$(dpkg -L fish 2>/dev/null | grep "bin/fish$" | head -1 || echo "")
+        fi
+    fi
+
+    if [[ -z "$fish_path" ]] || [[ ! -x "$fish_path" ]]; then
         log_error "fishコマンドが見つかりません。"
+        log_error "インストールの確認:"
+        log_error "  dpkg -l fish"
+        log_error "  apt-cache policy fish"
+
+        # 追加のデバッグ情報
+        log_debug "PATH: $PATH"
+        log_debug "which fish: $(which fish 2>&1 || echo 'not found')"
+        log_debug "dpkg -L fish: $(dpkg -L fish 2>&1 || echo 'not installed')"
+
         return 1
     fi
 
+    log_debug "Fish path found: $fish_path"
+    echo "$fish_path"
+}
+
+# fishの動作確認
+verify_fish_works() {
+    local fish_path="$1"
+
+    log_info "fishの動作確認を行っています..."
+
+    # fishが実行可能か確認
     if [[ ! -x "$fish_path" ]]; then
         log_error "fishが実行可能ではありません: $fish_path"
         return 1
     fi
 
-    echo "$fish_path"
+    # fishのバージョンを取得
+    local fish_version
+    fish_version=$("$fish_path" --version 2>&1) || {
+        log_error "fishのバージョン取得に失敗しました。"
+        log_error "出力: $fish_version"
+        return 1
+    }
+
+    log_success "Fish動作確認完了: $fish_version"
+
+    # 簡単なコマンド実行テスト
+    if ! "$fish_path" -c "echo 'Fish is working'" &>/dev/null; then
+        log_warn "fishの簡易テストに失敗しましたが、続行します。"
+    fi
+
+    return 0
 }
 
 # 現在のシェルを取得（クロスプラットフォーム対応）
@@ -569,6 +734,12 @@ add_fish_to_shells() {
 change_default_shell() {
     local fish_path="$1"
 
+    if [[ "$SKIP_SHELL_CHANGE" == "true" ]]; then
+        log_info "デフォルトシェルの変更をスキップします。"
+        log_info "後で手動で変更する場合: chsh -s $fish_path"
+        return 0
+    fi
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] デフォルトシェルをfishに変更する予定: $fish_path"
         return 0
@@ -582,6 +753,29 @@ change_default_shell() {
         return 0
     fi
 
+    # Raspberry Piでの警告
+    local os_type
+    os_type=$(detect_os)
+    if [[ "$os_type" == "raspberrypi" ]]; then
+        log_warn "========================================"
+        log_warn "Raspberry Piでのシェル変更に関する注意:"
+        log_warn "デフォルトシェルを変更すると、ログイン問題が"
+        log_warn "発生する可能性があります。"
+        log_warn "問題が発生した場合の復旧方法:"
+        log_warn "  1. SDカードを別のPCにマウント"
+        log_warn "  2. /etc/passwd を編集して /bin/bash に戻す"
+        log_warn "========================================"
+
+        if [[ "$AUTO_YES" != "true" ]]; then
+            read -rp "デフォルトシェルを変更しますか? (y/N): " reply
+            if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+                log_info "シェル変更をスキップします。"
+                log_info "fishを使用するには: exec fish"
+                return 0
+            fi
+        fi
+    fi
+
     log_info "デフォルトシェルをfishに変更しています..."
 
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -593,6 +787,7 @@ change_default_shell() {
         # Linux: chshが対話的になる場合があるため、sudo chshを使用
         sudo chsh -s "$fish_path" "$USER" || {
             log_error "デフォルトシェルの変更に失敗しました。"
+            log_info "手動で変更する場合: sudo chsh -s $fish_path $USER"
             return 1
         }
     fi
@@ -621,6 +816,8 @@ backup_existing_config() {
 
 # fisherとプラグインのインストール
 install_fisher_and_plugins() {
+    local fish_path="$1"
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] fisherとプラグインのインストールを実行する予定"
         return 0
@@ -630,55 +827,63 @@ install_fisher_and_plugins() {
 
     # 設定ディレクトリの作成
     mkdir -p "$CONFIG_DIR/functions"
+    mkdir -p "$CONFIG_DIR/completions"
+    mkdir -p "$CONFIG_DIR/conf.d"
 
     # Fisher のインストール（最新の公式方法）
     local fisher_installed=false
 
     # 方法1: 公式のインストール方法
-    if fish -c "curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher" 2>/dev/null; then
-        log_success "fisherのインストールが完了しました。"
-        fisher_installed=true
-    else
+    log_debug "Fisher インストール方法1を試行..."
+    if "$fish_path" -c 'curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher' 2>&1 | tee -a "$LOG_FILE"; then
+        if "$fish_path" -c "type -q fisher" 2>/dev/null; then
+            log_success "fisherのインストールが完了しました。"
+            fisher_installed=true
+        fi
+    fi
+
+    if [[ "$fisher_installed" != "true" ]]; then
         log_warn "標準方法でのfisherインストールに失敗しました。代替方法を試行します..."
 
         # 方法2: 手動ダウンロード
         local fisher_file="$CONFIG_DIR/functions/fisher.fish"
+        log_debug "Fisher インストール方法2を試行: $fisher_file"
+
         if safe_curl "https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish" "$fisher_file"; then
-            if fish -c "source $fisher_file && fisher install jorgebucaran/fisher" 2>/dev/null; then
-                log_success "手動方式でfisherのインストールが完了しました。"
-                fisher_installed=true
+            if "$fish_path" -c "source $fisher_file && fisher install jorgebucaran/fisher" 2>&1 | tee -a "$LOG_FILE"; then
+                if "$fish_path" -c "type -q fisher" 2>/dev/null; then
+                    log_success "手動方式でfisherのインストールが完了しました。"
+                    fisher_installed=true
+                fi
             fi
         fi
     fi
 
     if [[ "$fisher_installed" != "true" ]]; then
-        log_error "fisherのインストールに失敗しました。"
-        log_error "手動でインストールしてください:"
-        log_error "  curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher"
-        return 1
-    fi
-
-    # fisherが利用可能か確認
-    if ! fish -c "type -q fisher" 2>/dev/null; then
-        log_error "fisherがインストールされましたが、関数が見つかりません。"
-        return 1
+        log_warn "fisherのインストールに失敗しました。"
+        log_warn "後で手動でインストールしてください:"
+        log_warn "  curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher"
+        return 0  # エラーにしない（fishは使える）
     fi
 
     log_info "fisherプラグインをインストールしています..."
 
-    # プラグインリスト（最新の推奨プラグイン）
+    # プラグインリスト（最新の推奨プラグイン）- 軽量なものだけ
     local plugins=(
-        "jorgebucaran/fisher"
-        "PatrickF1/fzf.fish"
         "jethrokuan/z"
     )
+
+    # fzfがインストールされている場合のみfzf.fishを追加
+    if command -v fzf &>/dev/null; then
+        plugins+=("PatrickF1/fzf.fish")
+    fi
 
     local plugin_success=0
     local plugin_total=${#plugins[@]}
 
     for plugin in "${plugins[@]}"; do
         log_info "プラグインをインストール中: $plugin"
-        if fish -c "fisher install $plugin" 2>/dev/null; then
+        if "$fish_path" -c "fisher install $plugin" 2>&1 | tee -a "$LOG_FILE"; then
             log_success "プラグイン $plugin のインストールが完了しました。"
             plugin_success=$((plugin_success + 1))
         else
@@ -686,15 +891,12 @@ install_fisher_and_plugins() {
         fi
     done
 
-    # テーマのインストール（bobthefish または tide）
+    # テーマのインストール
     log_info "テーマをインストールしています..."
-    if fish -c "fisher install oh-my-fish/theme-bobthefish" 2>/dev/null; then
+    if "$fish_path" -c "fisher install oh-my-fish/theme-bobthefish" 2>&1 | tee -a "$LOG_FILE"; then
         log_success "theme-bobthefish のインストールが完了しました。"
     else
-        log_warn "theme-bobthefish のインストールに失敗しました。"
-        log_info "代替テーマ(tide)を試行します..."
-        fish -c "fisher install IlanCosman/tide@v5" 2>/dev/null || \
-            log_warn "tideのインストールにも失敗しました。デフォルトテーマを使用します。"
+        log_warn "theme-bobthefish のインストールに失敗しました。デフォルトテーマを使用します。"
     fi
 
     log_success "fisherとプラグインのセットアップが完了しました ($plugin_success/$plugin_total プラグイン)。"
@@ -762,7 +964,6 @@ abbr --add docup "docker compose up -d"
 abbr --add docdown "docker compose down"
 abbr --add docfdown "docker compose down --rmi all --volumes --remove-orphans"
 abbr --add doclog "docker compose logs -f"
-abbr --add docexec "docker compose exec"
 
 # Git abbreviations
 abbr --add gs "git status"
@@ -776,7 +977,6 @@ abbr --add gl "git log --oneline --graph"
 abbr --add gd "git diff"
 abbr --add gco "git checkout"
 abbr --add gb "git branch"
-abbr --add gst "git stash"
 
 # ------------------------------------
 # Theme settings (bobthefish theme)
@@ -785,115 +985,58 @@ set -g theme_display_date yes
 set -g theme_date_format "+%F %H:%M"
 set -g theme_display_git_default_branch yes
 set -g theme_color_scheme dark
-set -g theme_nerd_fonts yes
+set -g theme_nerd_fonts no
 set -g theme_display_cmd_duration yes
-set -g theme_title_display_process yes
-set -g theme_title_display_path yes
 
 # ------------------------------------
 # FZF settings
 # ------------------------------------
 if command -q fzf
-    set -gx FZF_DEFAULT_OPTS "--height 40% --layout=reverse --border --inline-info"
-
-    # fd が利用可能な場合は使用
-    if command -q fd
-        set -gx FZF_DEFAULT_COMMAND "fd --type f --hidden --follow --exclude .git"
-        set -gx FZF_CTRL_T_COMMAND "$FZF_DEFAULT_COMMAND"
-    else if command -q fdfind
-        set -gx FZF_DEFAULT_COMMAND "fdfind --type f --hidden --follow --exclude .git"
-        set -gx FZF_CTRL_T_COMMAND "$FZF_DEFAULT_COMMAND"
-    end
+    set -gx FZF_DEFAULT_OPTS "--height 40% --layout=reverse --border"
 end
 
 # ------------------------------------
 # Key bindings
 # ------------------------------------
 function fish_user_key_bindings
-    # fzf.fish プラグインが利用可能な場合は自動設定される
-    # そうでない場合は、標準の履歴検索を使用
-    if not functions -q fzf_key_bindings
-        bind \cr history-search-backward
-    end
+    bind \cr history-search-backward
 end
 
 # ------------------------------------
 # Environment variables
 # ------------------------------------
-# エディタ設定
 if command -q nvim
     set -gx EDITOR nvim
-    set -gx VISUAL nvim
 else if command -q vim
     set -gx EDITOR vim
-    set -gx VISUAL vim
 else
     set -gx EDITOR nano
-    set -gx VISUAL nano
 end
 
 set -gx LANG ja_JP.UTF-8
-set -gx LC_ALL ja_JP.UTF-8
 
 # ------------------------------------
 # PATH settings
 # ------------------------------------
-# ローカルbin
 if test -d ~/.local/bin
     fish_add_path ~/.local/bin
 end
 
-# Cargo (Rust)
 if test -d ~/.cargo/bin
     fish_add_path ~/.cargo/bin
-end
-
-# Go
-if test -d ~/go/bin
-    fish_add_path ~/go/bin
-end
-
-# Homebrew (macOS)
-if test -d /opt/homebrew/bin
-    fish_add_path /opt/homebrew/bin
 end
 
 # ------------------------------------
 # Utility functions
 # ------------------------------------
-
-# ディレクトリ作成と移動を同時に
 function mkcd
     mkdir -p $argv[1] && cd $argv[1]
 end
 
-# ファイルのバックアップを作成
 function backup
     cp $argv[1] $argv[1].backup.(date +%Y%m%d_%H%M%S)
 end
 
-# 指定秒後にアラート
-function timer
-    set -l seconds $argv[1]
-    set -l message $argv[2]
-    if test -z "$message"
-        set message "Timer finished!"
-    end
-    sleep $seconds && echo $message && if command -q notify-send
-        notify-send "Timer" "$message"
-    end
-end
-
-# ------------------------------------
-# Fisher plugin management (参考)
-# ------------------------------------
-# fisher list                    # インストール済みプラグインを表示
-# fisher install <plugin>        # プラグインをインストール
-# fisher remove <plugin>         # プラグインを削除
-# fisher update                  # すべてのプラグインを更新
-
-# ==============================================================================
-# Custom configurations can be added below
 # ==============================================================================
 FISHCONFIG
 
@@ -917,9 +1060,10 @@ confirm_installation() {
     log_info "以下の処理を実行します:"
     echo "  - OS: $os_type"
     echo "  - Fish shell のインストール"
-    echo "  - eza (モダンなls代替) のインストール"
-    echo "  - その他の関連パッケージのインストール"
-    echo "  - デフォルトシェルの変更"
+    echo "  - 関連パッケージのインストール"
+    if [[ "$SKIP_SHELL_CHANGE" != "true" ]]; then
+        echo "  - デフォルトシェルの変更"
+    fi
     echo "  - Fisher とプラグインのインストール"
     echo "  - 設定ファイルの作成"
     echo
@@ -934,15 +1078,22 @@ confirm_installation() {
 
 # インストール検証
 verify_installation() {
+    local fish_path="${1:-}"
+
     log_info "インストールの検証を行っています..."
 
     local errors=0
 
+    # fish パスが渡されていない場合は取得
+    if [[ -z "$fish_path" ]]; then
+        fish_path=$(get_fish_path 2>/dev/null || echo "")
+    fi
+
     # fish コマンドの確認
-    if command -v fish &> /dev/null; then
+    if [[ -n "$fish_path" ]] && [[ -x "$fish_path" ]]; then
         local fish_version
-        fish_version=$(fish --version 2>/dev/null || echo "unknown")
-        log_success "Fish shell: $fish_version"
+        fish_version=$("$fish_path" --version 2>/dev/null || echo "unknown")
+        log_success "Fish shell: $fish_version (パス: $fish_path)"
     else
         log_error "Fish shell が見つかりません"
         errors=$((errors + 1))
@@ -956,7 +1107,7 @@ verify_installation() {
     fi
 
     # fisher の確認
-    if fish -c "type -q fisher" 2>/dev/null; then
+    if [[ -n "$fish_path" ]] && "$fish_path" -c "type -q fisher" 2>/dev/null; then
         log_success "Fisher: インストール済み"
     else
         log_warn "Fisher がインストールされていない可能性があります"
@@ -966,23 +1117,27 @@ verify_installation() {
     if command -v eza &> /dev/null; then
         log_success "eza: インストール済み"
     elif command -v exa &> /dev/null; then
-        log_warn "exa: インストール済み（ezaへの移行を推奨）"
+        log_info "exa: インストール済み"
     else
-        log_warn "eza/exa: 未インストール（標準lsを使用）"
+        log_info "eza/exa: 未インストール（標準lsを使用）"
+    fi
+
+    # /etc/shells の確認
+    if [[ -n "$fish_path" ]] && grep -qxF "$fish_path" /etc/shells 2>/dev/null; then
+        log_success "/etc/shells: fishが登録済み"
+    else
+        log_warn "/etc/shells: fishが登録されていません"
     fi
 
     # デフォルトシェルの確認
     local current_shell
     current_shell=$(get_current_shell)
-    local fish_path
-    fish_path=$(command -v fish 2>/dev/null || echo "")
 
     if [[ "$current_shell" == "$fish_path" ]]; then
         log_success "デフォルトシェル: fish"
     else
-        log_warn "デフォルトシェルはfishではありません: $current_shell"
-        log_info "新しいターミナルセッションを開くか、以下を実行してください:"
-        log_info "  chsh -s $fish_path"
+        log_info "デフォルトシェル: $current_shell (fishではありません)"
+        log_info "fishを起動するには: exec fish"
     fi
 
     if [[ $errors -gt 0 ]]; then
@@ -1010,6 +1165,9 @@ main() {
     echo "Started at: $(date)" >> "$LOG_FILE"
     echo "" >> "$LOG_FILE"
 
+    # システム情報の収集
+    collect_system_info
+
     # 依存関係チェック
     check_dependencies
 
@@ -1017,6 +1175,11 @@ main() {
     log_info "OSの検出を行っています..."
     os_type=$(detect_os)
     log_success "検出されたOS: $os_type"
+
+    # アーキテクチャ
+    local arch
+    arch=$(detect_architecture)
+    log_info "アーキテクチャ: $arch"
 
     case "$os_type" in
         "unsupported"|"unsupported_linux")
@@ -1043,21 +1206,26 @@ main() {
             install_fish_ubuntu
             ;;
         "debian")
-            install_fish_ubuntu  # Debianも同じ処理
+            install_fish_ubuntu
             ;;
         "raspberrypi")
             install_fish_raspberrypi
             ;;
     esac
 
-    # sudo更新プロセスの停止
-    if [[ "$os_type" != "macos" ]]; then
-        stop_sudo_refresh
-    fi
-
     # Fish パス取得と検証
-    fish_path=$(get_fish_path) || exit 1
+    fish_path=$(get_fish_path) || {
+        log_error "fishのインストールに問題があります。"
+        log_error "ログファイルを確認してください: $LOG_FILE"
+        exit 1
+    }
     log_success "Fish パス: $fish_path"
+
+    # fishの動作確認
+    verify_fish_works "$fish_path" || {
+        log_error "fishが正常に動作していません。"
+        exit 1
+    }
 
     # /etc/shells への追加
     add_fish_to_shells "$fish_path"
@@ -1072,11 +1240,11 @@ main() {
     create_fish_config
 
     # Fisher とプラグインのインストール
-    install_fisher_and_plugins
+    install_fisher_and_plugins "$fish_path"
 
     # インストール検証
     echo
-    verify_installation
+    verify_installation "$fish_path"
 
     # 完了メッセージ
     echo
@@ -1086,11 +1254,11 @@ main() {
     echo
     echo "次のステップ:"
     echo "  1. 新しいターミナルを開く、または以下を実行:"
-    echo "     exec fish"
-    echo "  2. 設定を確認:"
+    echo "     exec $fish_path"
+    echo "  2. fishの動作確認:"
+    echo "     fish --version"
+    echo "  3. 設定を確認:"
     echo "     fish_config"
-    echo "  3. プラグインの確認:"
-    echo "     fisher list"
     echo
 
     if [[ -f "${CONFIG_FILE}.${BACKUP_SUFFIX}" ]]; then
@@ -1101,7 +1269,16 @@ main() {
 
     echo "ログファイル: $LOG_FILE"
     echo
-    echo "問題が発生した場合は、バックアップから復元できます。"
+
+    if [[ "$SKIP_SHELL_CHANGE" == "true" ]] || [[ "$(get_current_shell)" != "$fish_path" ]]; then
+        echo "========================================"
+        echo "fishをデフォルトシェルにするには:"
+        echo "  chsh -s $fish_path"
+        echo ""
+        echo "または、bashから一時的にfishを使用:"
+        echo "  exec fish"
+        echo "========================================"
+    fi
 }
 
 # コマンドライン引数の処理
@@ -1121,6 +1298,10 @@ while [[ $# -gt 0 ]]; do
         -v|--verbose)
             VERBOSE=true
             log_info "詳細モードで実行します。"
+            ;;
+        --skip-shell-change)
+            SKIP_SHELL_CHANGE=true
+            log_info "デフォルトシェルの変更をスキップします。"
             ;;
         *)
             log_error "不明なオプション: $1"
