@@ -1,10 +1,10 @@
 # dotfiles_fish
 
-🐠 **Fish Shell用の自動セットアップスクリプト**
+Fish shell の導入から設定までを、macOS・Ubuntu・Debian・Raspberry Pi OS で自動化するインストーラです。
 
-Fish shell の導入から設定まで、macOS・Ubuntu・Raspberry Pi で自動化します。
+設定ファイルはこのリポジトリには置かず、`.bin/install.sh` が `~/.config/fish/config.fish` を生成します。
 
-## 📋 目次
+## 目次
 
 - [概要](#概要)
 - [対応環境](#対応環境)
@@ -17,305 +17,324 @@ Fish shell の導入から設定まで、macOS・Ubuntu・Raspberry Pi で自動
 - [カスタマイズ](#カスタマイズ)
 - [よくある質問](#よくある質問)
 
-## 🎯 概要
+## 概要
 
-このプロジェクトは、Fish shell（Friendly Interactive SHell）を簡単に導入・設定するための自動化スクリプトです。以下の作業を一括で行います：
+このスクリプトは次をまとめて行います。
 
 - Fish shell のインストール
-- 関連ツールとプラグインのセットアップ
-- 美しいテーマとプロンプトの設定
-- 便利なエイリアス（abbreviation）の設定
-- 既存設定の安全なバックアップ
+- fisher と軽量なプラグイン、bobthefish テーマのセットアップ
+- `eza` などの補助コマンドのインストール
+- abbreviation と環境変数の設定
+- 既存の `config.fish` のバックアップ
 
-## 💻 対応環境
+インストーラ自体は Bash で動きます。Fish が未導入の状態から実行できます。
 
-| OS | 検証状況 | 備考 |
+## 対応環境
+
+| OS | Fish の入手元 | 備考 |
 |---|---|---|
-| **macOS** | ✅ 完全対応 | Homebrew使用 |
-| **Ubuntu/Debian** | ✅ 完全対応 | PPA使用 |
-| **Raspberry Pi** | ✅ 完全対応 | openSUSE Build Service使用 |
+| macOS | Homebrew | Apple Silicon / Intel |
+| Ubuntu | `ppa:fish-shell/release-4` | 22.04 / 24.04 / 26.04 を想定。失敗時はディストリビューションのパッケージ |
+| Debian | ディストリビューションのパッケージ | 12 (bookworm) / 13 (trixie) を想定 |
+| Raspberry Pi OS | ディストリビューションのパッケージ | 標準リポジトリで失敗したときだけ openSUSE Build Service を使う。パッケージは Zero 向けに絞っている |
 
-### 検証済みバージョン
-- macOS 12.0+ (Monterey以降)
-- Ubuntu 20.04 LTS, 22.04 LTS
-- Raspberry Pi OS (Debian 11/12 base)
+Raspberry Pi で標準リポジトリからのインストールに失敗した場合:
 
-## 🔧 システム要件
+- Debian 12 以降: `shells:fish:release:4`
+- Debian 11 以前: `shells:fish:release:3`
 
-### 必須要件
-- **curl**: HTTPリクエスト用
-- **git**: バージョン管理とクローン用
-- **sudo権限**: パッケージインストール用（macOS以外）
+Ubuntu を Raspberry Pi に入れている場合は、Ubuntu として判定し Fish 4 の PPA を使います。
 
-### 自動でインストールされるツール
-- **fish**: メインシェル
-- **fisher**: Fish用プラグインマネージャー
-- **exa**: lsコマンドの改良版
-- **peco**: インタラクティブフィルタリングツール
-- **neovim**: 高機能エディタ
-- **bat**: catコマンドの改良版
-- **duf**: dfコマンドの改良版
+## システム要件
 
-## 🚀 インストール方法
+### 実行に必要なもの
 
-### 1. クイックインストール（推奨）
+- Bash
+- `curl`
+- `git`
+- パッケージインストール用の sudo（macOS で Homebrew 済みの場合を除く）
+- ネットワーク接続
+
+`curl` と `git` が無く、`apt` が使える場合はスクリプトが入れます。
+
+### インストールされるもの
+
+| ツール | macOS | Ubuntu / Debian | Raspberry Pi OS | 用途 |
+|---|---|---|---|---|
+| fish | 入れる | 入れる | 入れる | シェル |
+| fisher | 入れる | 入れる | 入れる | プラグイン管理 |
+| bobthefish | 入れる | 入れる | 入れる | プロンプト |
+| jethrokuan/z | 入れる | 入れる | 入れる | ディレクトリ移動 |
+| fzf と fzf.fish | 入れる | 入れる | 入れる | `Ctrl+R` の履歴検索 |
+| eza | 入れる | 入れる | 失敗したら `ls` | `ls` の代替 |
+| bat | 入れる | 入れる | 入れない | `cat` の代替 |
+| fd | 入れる | `fd-find` を `fd` として使えるようにする | 入れない | ファイル検索 |
+| ripgrep | 入れる | 入れる | 入れない | 文字列検索 |
+
+Raspberry Pi OS ではメモリの小さい機種を想定し、追加パッケージは `fzf` までにしています。neovim、peco、duf はインストールしません。`EDITOR` は、入っていれば `nvim`、次に `vim`、どちらも無ければ `nano` です。
+
+Debian 系では署名検証用の `gpg` と、可能なら `ja_JP.UTF-8` ロケールも用意します。
+
+## インストール方法
+
+### 1. クローンして実行
 
 ```bash
-# リポジトリをクローンして実行
-git clone https://github.com/your-username/dotfiles_fish.git
+git clone https://github.com/prosection/dotfiles_fish.git
 cd dotfiles_fish
 chmod +x .bin/install.sh
 ./.bin/install.sh
 ```
 
-### 2. ワンライナーインストール
+### 2. ワンライナー
+
+端末から実行してください。確認は `/dev/tty` から読みます。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/your-username/dotfiles_fish/main/.bin/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/prosection/dotfiles_fish/main/.bin/install.sh | bash
 ```
 
-### 3. オプション付きインストール
+TTY が無い環境では `-y` を渡します。
 
 ```bash
-# ドライランモード（実際にはインストールしない）
+curl -fsSL https://raw.githubusercontent.com/prosection/dotfiles_fish/main/.bin/install.sh | bash -s -- -y
+```
+
+### 3. オプション
+
+```bash
+# 変更を加えずに予定だけ表示する
 ./.bin/install.sh --dry-run
 
-# 確認をスキップして自動実行
+# 確認を省略する
 ./.bin/install.sh -y
 
-# ヘルプを表示
+# デフォルトシェルは変えない
+./.bin/install.sh --skip-shell-change
+
+# ヘルプ
 ./.bin/install.sh --help
 ```
 
-## ✨ 機能
+`--dry-run` はパッケージのインストール、sudo、設定ファイルの書き込み、シェル変更を行いません。
 
-### 🛡️ 安全機能
-- **既存設定の自動バックアップ**: タイムスタンプ付きでバックアップ
-- **エラー時の即座停止**: `set -e`によるフェイルファスト
-- **依存関係の事前チェック**: 必要コマンドの存在確認
-- **sudo権限の確認**: 実行前の権限チェック
-- **ドライランモード**: 実際の変更前の実行内容確認
+再実行すると、現在の `config.fish` をタイムスタンプ付きでバックアップしたあと、生成した設定で上書きします。手で足した行は新しいファイルには残りません。
 
-### 🎨 テーマと見た目
-- **bobthefish テーマ**: 美しく情報豊富なプロンプト
-- **Nerd Fonts対応**: アイコン表示（要フォントインストール）
-- **Git統合**: ブランチ名、変更状況の表示
-- **日時表示**: プロンプトに現在日時を表示
+## 機能
 
-### ⌨️ キーバインド
-- `Ctrl+R`: peco による履歴検索
-- 標準Fish キーバインド維持
+- 既存の `config.fish` を `config.fish.backup.YYYYMMDD_HHMMSS` として残す
+- `set -e`、`set -u`、`pipefail` で失敗を止める
+- 同じユーザーでの多重起動をロックで防ぐ
+- ログを `/tmp/fish_install_<ユーザー>.log` に残す
+- Raspberry Pi OS では、デフォルトシェルを変える前に確認する
 
-## 📝 設定内容
+プロンプトは bobthefish を、Powerline フォントも Nerd Font も要らない設定で入れます。記号が欠ける状態で初回起動しないようにするためです。
 
-### エイリアス（Abbreviations）
+## 設定内容
 
-| エイリアス | コマンド | 説明 |
+### Abbreviations
+
+| 名前 | コマンド | 説明 |
 |---|---|---|
-| `ee` | `exa -aal --icons` | 詳細ファイル一覧（アイコン付き） |
-| `ll` | `exa -l --icons` | 長い形式一覧 |
-| `la` | `exa -la --icons` | 隠しファイル含む一覧 |
-| `update` | `sudo apt update; sudo apt upgrade -y` | システム更新（Ubuntu） |
-| `gs` | `git status` | Gitステータス |
-| `ga` | `git add` | Gitファイル追加 |
-| `gc` | `git commit` | Gitコミット |
-| `docup` | `docker compose up -d` | Docker Compose起動 |
-| `docdown` | `docker compose down` | Docker Compose停止 |
+| `ll` | `eza -l --git` | 一覧。eza が無ければ `ls -lh` |
+| `la` | `eza -la --git` | 隠しファイルを含む一覧 |
+| `lt` | `eza -la --git --tree --level=2` | 2階層のツリー |
+| `ee` | `eza -aal --git` | 詳細一覧 |
+| `cat` | `bat` または `batcat` | 入っているときだけ |
+| `update` | macOS は `brew update && brew upgrade`、それ以外で apt があるときは `sudo apt update && sudo apt upgrade -y` | パッケージ更新 |
+| `gs` / `ga` / `gc` | `git status` / `git add` / `git commit` | Git |
+| `docup` / `docdown` | `docker compose up -d` / `docker compose down` | Docker Compose |
+| `docfdown` | `docker compose down --rmi all --volumes --remove-orphans` | イメージとボリュームも削除する |
+
+`docfdown` はデータを消します。
+
+### キーバインド
+
+`Ctrl+R` はスクリプト側では上書きしません。
+
+- `fzf.fish` が入ったあとは、fzf による履歴検索
+- 入っていないときは、Fish 本来の履歴検索
 
 ### 環境変数
-- `EDITOR`: neovim に設定
-- `LANG`: ja_JP.UTF-8 に設定
-- `PATH`: ~/.local/bin, ~/.cargo/bin を追加
 
-## 🔧 トラブルシューティング
+- `EDITOR`: `nvim`、無ければ `vim`、無ければ `nano`
+- `LANG`: `ja_JP.UTF-8` が有効なときだけそれにする。無ければ `C.UTF-8`、それも無ければ `en_US.UTF-8`
+- `PATH`: `~/.local/bin` と `~/.cargo/bin` があれば追加
 
-### よくあるエラーと解決方法
+### プラグイン
 
-#### 1. `curl: command not found`
+- `jorgebucaran/fisher`
+- `jethrokuan/z`
+- `PatrickF1/fzf.fish`（`fzf` コマンドがあるとき）
+- `oh-my-fish/theme-bobthefish`
+
+## トラブルシューティング
+
+### `curl: command not found`
+
 ```bash
-# Ubuntu/Debian
+# Ubuntu / Debian / Raspberry Pi OS
 sudo apt update && sudo apt install curl
 
 # macOS
 xcode-select --install
 ```
 
-#### 2. `sudo: a password is required`
+### sudo のパスワードを求められる
+
 ```bash
-# パスワードを入力してsudo権限を取得
 sudo -v
 ./.bin/install.sh
 ```
 
-#### 3. Fish がデフォルトシェルにならない
-```bash
-# 手動でシェル変更
-sudo chsh -s $(which fish) $USER
+### ワンライナーが確認のところで止まった、またはキャンセルされた
 
-# または現在のセッションのみ
+パイプの標準入力からは読みません。端末で実行するか、次のようにしてください。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/prosection/dotfiles_fish/main/.bin/install.sh | bash -s -- -y
+```
+
+### Fish がデフォルトシェルにならない
+
+```bash
+sudo chsh -s "$(which fish)" "$USER"
+```
+
+現在のセッションだけ切り替える場合:
+
+```bash
 exec fish
 ```
 
-#### 4. Fisher/プラグインのインストールに失敗
+Raspberry Pi OS では、ログインできなくなったときの復旧手段を表示したあと、明示的に同意した場合だけシェルを変えます。`-y` を付けたときはこの確認も省略します。
+
+### fisher のインストールに失敗した
+
 ```bash
-# 最新のFisherを手動でインストール（推奨）
 curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source
 fisher install jorgebucaran/fisher
-
-# プラグインを手動でインストール
+fisher install jethrokuan/z
+fisher install PatrickF1/fzf.fish
 fisher install oh-my-fish/theme-bobthefish
-fisher install oh-my-fish/plugin-peco
-
-# 古いURL（フォールバック）
-curl -sL git.io/fisher | source && fisher update
-
-# 手動ダウンロード方式
-mkdir -p ~/.config/fish/functions
-curl -sL -o ~/.config/fish/functions/fisher.fish https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish
-fish -c "source ~/.config/fish/functions/fisher.fish && fisher install jorgebucaran/fisher"
 ```
 
-#### 5. 関連パッケージ（exa、bat、peco等）がインストールされない
+### eza が入らない
+
+`gpg` が無い、リポジトリにそのアーキテクチャのパッケージが無い、といった理由で失敗しても、インストール全体は続行し、abbreviation は `ls` になります。ログは `/tmp/fish_install_<ユーザー>.log` です。
+
+### 日本語ロケールの警告が出る
+
+Debian 系では `ja_JP.UTF-8` の生成を試みます。失敗したときは、生成済みの UTF-8 ロケールに落とします。手動で有効にする場合:
+
 ```bash
-# Raspberry Pi用の手動インストール
-sudo apt update
-sudo apt install neovim exa bat peco duf xsel -y
-
-# 代替パッケージ（一部が利用できない場合）
-sudo apt install vim lsd batcat -y
-
-# 個別インストール
-sudo apt install neovim -y  # エディタ
-sudo apt install exa -y     # ls改良版（または lsd）
-sudo apt install bat -y     # cat改良版（または batcat）
-sudo apt install peco -y    # インタラクティブフィルタ
-sudo apt install duf -y     # df改良版
+sudo apt install -y locales
+sudo locale-gen ja_JP.UTF-8
 ```
 
-#### 6. テーマが正しく表示されない
-```bash
-# Nerd Fontsをインストール
-# 各OS向けの手順はこちら: https://www.nerdfonts.com/
+### アイコンや Powerline 字形を使いたい
 
-# Ubuntu/Raspberry Pi
-sudo apt install fonts-firacode fonts-powerline -y
+端末に Nerd Font を設定したあと、`~/.config/fish/config.fish` で次のように変えます。
+
+```fish
+abbr --erase ll la lt ee
+abbr --add ll "eza -l --icons --git"
+abbr --add la "eza -la --icons --git"
+abbr --add lt "eza -la --icons --git --tree --level=2"
+abbr --add ee "eza -aal --icons --git"
+
+set -g theme_powerline_fonts yes
+set -g theme_nerd_fonts yes
 ```
 
-### 設定の復元
+フォントの入手先: https://www.nerdfonts.com/
+
+### 設定を戻す
 
 ```bash
-# 自動バックアップから復元
 cp ~/.config/fish/config.fish.backup.YYYYMMDD_HHMMSS ~/.config/fish/config.fish
-
-# 完全リセット（要注意）
-rm -rf ~/.config/fish
 ```
 
-## 🗑️ アンインストール
-
-### Fish shell の完全削除
+## アンインストール
 
 ```bash
-# 1. デフォルトシェルを戻す
-sudo chsh -s /bin/bash $USER
+# 1. ログインシェルを戻す
+sudo chsh -s /bin/bash "$USER"
 
-# 2. 設定削除
-rm -rf ~/.config/fish
-rm -rf ~/.local/share/fish
+# 2. Fish の設定を消す
+rm -rf ~/.config/fish ~/.local/share/fish
 
-# 3. パッケージ削除（Ubuntu）
-sudo apt remove fish -y
-
-# 3. パッケージ削除（macOS）
+# 3. パッケージを消す
+# Ubuntu / Debian / Raspberry Pi OS
+sudo apt remove -y fish
+# macOS
 brew uninstall fish
 
-# 4. /etc/shells から削除
+# 4. このスクリプトが追加した APT ソースを消す場合
+sudo add-apt-repository --remove ppa:fish-shell/release-4
+sudo rm -f /etc/apt/sources.list.d/gierens.list /etc/apt/keyrings/gierens.gpg
+sudo rm -f /etc/apt/sources.list.d/shells_fish_release_3.list \
+           /etc/apt/sources.list.d/shells_fish_release_4.list \
+           /etc/apt/keyrings/shells_fish_release_3.gpg \
+           /etc/apt/keyrings/shells_fish_release_4.gpg \
+           /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg
+
+# 5. /etc/shells から fish の行を消す
 sudo sed -i '/fish/d' /etc/shells
 ```
 
-## 🎨 カスタマイズ
+macOS の `/etc/shells` は `sed -i` の書式が異なるため、エディタで該当行を削除してください。
 
-### 独自エイリアスの追加
+## カスタマイズ
 
-`~/.config/fish/config.fish` を編集：
+`~/.config/fish/config.fish` に足せます。
 
 ```fish
-# 独自エイリアスを追加
 abbr myalias "your-command-here"
-abbr work "cd ~/work && ls"
+abbr work "cd ~/work; and ls"
 ```
 
-### テーマの変更
+テーマを変える例:
 
 ```fish
-# 利用可能なテーマを確認
 fisher list
-
-# 別のテーマをインストール
-fisher install oh-my-fish/theme-agnoster
+fisher install IlanCosman/tide@v6
 ```
 
-### 関数の追加
+関数は `~/.config/fish/functions/myfunction.fish` に置けます。
 
 ```fish
-# ~/.config/fish/functions/myfunction.fish に保存
 function myfunction
     echo "Hello from my custom function!"
 end
 ```
 
-## ❓ よくある質問
+## よくある質問
 
-### Q: 既存のbash設定は削除されますか？
-A: いいえ。このスクリプトはFishの設定のみを行い、既存のbash設定（.bashrc等）には触れません。
+### 既存の bash 設定は消えますか？
 
-### Q: 元のシェルに戻せますか？
-A: はい。`sudo chsh -s /bin/bash $USER`でbashに戻せます。
+消えません。変更するのは Fish の設定、デフォルトシェル、パッケージです。`.bashrc` には触れません。
 
-### Q: 他のFish設定と競合しますか？
-A: 既存設定は自動でバックアップされるため、必要に応じて復元可能です。
+### 元のシェルに戻せますか？
 
-### Q: ネットワーク接続が必要ですか？
-A: はい。パッケージダウンロードとプラグインインストールに必要です。
+`sudo chsh -s /bin/bash "$USER"` で bash に戻せます。
 
-### Q: root権限で実行できますか？
-A: 推奨しません。一般ユーザーで実行し、必要時のみsudoを使用します。
+### すでに Fish の設定がある場合は？
 
-### Q: Fish以外のシェルでも動作しますか？
-A: このスクリプトはFish専用です。Bash/Zshでは動作しません。
+`config.fish` はバックアップしてから置き換えます。fisher のプラグインディレクトリは削除しません。
 
-### Q: fisherやプラグインのインストールに失敗します
-A: 複数の原因が考えられます：
-- **ネットワーク問題**: GitHubへのアクセスが制限されている
-- **Fisher URL変更**: 最新のインストール方法を使用してください
-- **手動解決**: `fisher install oh-my-fish/theme-bobthefish` で個別インストール
-- **代替ツール**: oh-my-fish (omf) の使用も検討してください
+### root で実行できますか？
 
-### Q: テーマが表示されないか文字化けします
-A: Nerd Fonts のインストールが必要です：
-- macOS: `brew tap homebrew/cask-fonts && brew install font-hack-nerd-font`
-- Ubuntu: `sudo apt install fonts-firacode fonts-powerline`
-- 手動: https://www.nerdfonts.com/ からダウンロード
+一般ユーザーで実行し、必要なところだけ sudo を使ってください。
 
-## 🤝 コントリビューション
+### Bash や Zsh から実行できますか？
 
-バグ報告や機能提案は Issue でお知らせください。プルリクエストも歓迎です。
+インストーラは Bash スクリプトです。Bash から実行します。設定される対話シェルは Fish です。
 
-### 開発者向け
+### ネットワークは必要ですか？
 
-```bash
-# テスト実行（Docker使用）
-docker run -it ubuntu:latest bash
-# ... スクリプトをテスト
+必要です。パッケージとプラグインの取得に使います。
 
-# ドライラン確認
-./.bin/install.sh --dry-run
-```
+## ライセンス
 
-## 📄 ライセンス
-
-MIT License - 詳細は [LICENSE](LICENSE) ファイルを参照してください。
-
----
-
-**🎉 Fish shell ライフをお楽しみください！ 🐠**
+MIT License。詳細は [LICENSE](LICENSE) を参照してください。

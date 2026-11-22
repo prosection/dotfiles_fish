@@ -11,6 +11,19 @@ set -e  # エラー時に即座に終了
 set -u  # 未定義変数の使用でエラー
 set -o pipefail  # パイプラインのエラーを検出
 
+# Linux / macOS は USER、一部の環境は USERNAME だけを渡す
+if [[ -z "${USER:-}" ]]; then
+    USER="${USERNAME:-}"
+fi
+if [[ -z "${USER:-}" ]]; then
+    USER="$(id -un 2>/dev/null || true)"
+fi
+if [[ -z "${USER:-}" ]]; then
+    echo "ユーザー名を取得できません。" >&2
+    exit 1
+fi
+export USER
+
 # 設定可能な変数
 SCRIPT_NAME="$(basename "$0")"
 readonly CONFIG_DIR="$HOME/.config/fish"
@@ -74,11 +87,11 @@ cleanup() {
         rm -f "$LOCK_FILE"
     fi
 
-    # 一時ファイルの削除
-    rm -f /tmp/fish_install_*.tmp 2>/dev/null || true
-    rm -f /tmp/fish_opensuse_*.key 2>/dev/null || true
-    rm -f /tmp/eza_gierens_*.gpg 2>/dev/null || true
-    rm -f /tmp/homebrew_install_*.sh 2>/dev/null || true
+    # この実行が作った一時ファイルだけを削除する
+    rm -f "/tmp/fish_install_$$.tmp" \
+          "/tmp/fish_opensuse_$$.key" \
+          "/tmp/eza_gierens_$$.gpg" \
+          "/tmp/homebrew_install_$$.sh" 2>/dev/null || true
 
     if [[ $exit_code -ne 0 ]]; then
         log_error "スクリプトがエラーコード $exit_code で終了しました。"
@@ -133,6 +146,9 @@ show_usage() {
   VERBOSE=true         詳細モードで実行
   SKIP_SHELL_CHANGE=true  シェル変更をスキップ
 
+標準入力が端末でない場合（パイプ実行で TTY が無い場合）は -y を付けてください。
+確認プロンプトは /dev/tty から読みます。
+
 例:
   $SCRIPT_NAME                    # 通常のインストール
   $SCRIPT_NAME --dry-run          # ドライランモード
@@ -182,6 +198,12 @@ check_dependencies() {
 
     if [[ ${#missing_commands[@]} -gt 0 ]]; then
         log_warn "以下のコマンドが見つかりません: ${missing_commands[*]}"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] 不足しているコマンドのインストールを実行する予定: ${missing_commands[*]}"
+            return 0
+        fi
+
         log_info "必要なパッケージをインストールしています..."
 
         if command -v apt &>/dev/null; then
@@ -201,6 +223,11 @@ check_dependencies() {
 
 # sudo権限の確認
 check_sudo() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] sudo権限の確認を実行する予定"
+        return 0
+    fi
+
     log_info "sudo権限の確認を行っています..."
     if ! sudo -n true 2>/dev/null; then
         log_warn "このスクリプトはsudo権限を必要とします。"
@@ -240,61 +267,84 @@ detect_architecture() {
     esac
 }
 
+# os-release のキーを取得する。無い場合は空文字
+os_release_value() {
+    local key="$1"
+    local value=""
+
+    if [[ -f /etc/os-release ]]; then
+        value=$(grep -E "^${key}=" /etc/os-release 2>/dev/null | head -n 1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+    fi
+
+    echo "$value"
+}
+
 # OS検出関数
 detect_os() {
     local os_type="unsupported"
+    local os_id=""
 
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        os_type="macos"
-    elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "linux"* ]]; then
-        if [[ -f /etc/debian_version ]]; then
-            # Raspberry Pi の堅牢な検出（NULLバイト対策）
-            if [[ -f /etc/rpi-issue ]]; then
-                os_type="raspberrypi"
-            elif [[ -f /proc/device-tree/model ]]; then
-                # NULLバイトを除去して検索
-                if tr -d '\0' < /proc/device-tree/model 2>/dev/null | grep -qi "raspberry pi"; then
-                    os_type="raspberrypi"
-                else
-                    os_type="debian"
-                fi
-            else
-                # Ubuntu と Debian を区別
-                if [[ -f /etc/lsb-release ]] && grep -q "Ubuntu" /etc/lsb-release 2>/dev/null; then
-                    os_type="ubuntu"
-                else
-                    os_type="debian"
-                fi
-            fi
-        else
-            os_type="unsupported_linux"
-        fi
+        echo "macos"
+        return 0
     fi
 
-    echo "$os_type"
+    if [[ "$OSTYPE" != "linux-gnu"* && "$OSTYPE" != "linux"* ]]; then
+        echo "unsupported"
+        return 0
+    fi
+
+    os_id=$(os_release_value ID)
+
+    # Ubuntu on Raspberry Pi でも Fish 4 の PPA を使う
+    if [[ "$os_id" == "ubuntu" ]]; then
+        echo "ubuntu"
+        return 0
+    fi
+
+    if [[ "$os_id" == "raspbian" || "$os_id" == "raspberrypi" || -f /etc/rpi-issue ]]; then
+        echo "raspberrypi"
+        return 0
+    fi
+
+    # NULLバイトを除去して機種名を見る
+    if [[ -f /proc/device-tree/model ]] && tr -d '\0' < /proc/device-tree/model 2>/dev/null | grep -qi "raspberry pi"; then
+        echo "raspberrypi"
+        return 0
+    fi
+
+    if [[ "$os_id" == "debian" || -f /etc/debian_version ]]; then
+        echo "debian"
+        return 0
+    fi
+
+    echo "unsupported_linux"
 }
 
 # Debianバージョン検出
 detect_debian_version() {
     local version=""
+    local codename=""
 
-    if [[ -f /etc/debian_version ]]; then
-        # バージョン番号を取得 (例: 12.0 -> 12)
-        version=$(cut -d'.' -f1 < /etc/debian_version 2>/dev/null || echo "")
+    version=$(os_release_value VERSION_ID)
+    version="${version%%.*}"
 
-        # コードネームからも判別を試行
-        if [[ -z "$version" ]] || ! [[ "$version" =~ ^[0-9]+$ ]]; then
-            if [[ -f /etc/os-release ]]; then
-                local codename
-                codename=$(grep "VERSION_CODENAME" /etc/os-release 2>/dev/null | cut -d'=' -f2 || echo "")
-                case "$codename" in
-                    bookworm) version="12" ;;
-                    bullseye) version="11" ;;
-                    buster)   version="10" ;;
-                    *)        version="" ;;
-                esac
-            fi
+    if [[ -z "$version" || ! "$version" =~ ^[0-9]+$ ]]; then
+        if [[ -f /etc/debian_version ]]; then
+            version=$(cut -d'.' -f1 < /etc/debian_version 2>/dev/null || true)
         fi
+    fi
+
+    if [[ -z "$version" || ! "$version" =~ ^[0-9]+$ ]]; then
+        codename=$(os_release_value VERSION_CODENAME)
+        case "$codename" in
+            forky)    version="14" ;;
+            trixie)   version="13" ;;
+            bookworm) version="12" ;;
+            bullseye) version="11" ;;
+            buster)   version="10" ;;
+            *)        version="" ;;
+        esac
     fi
 
     echo "$version"
@@ -321,6 +371,90 @@ safe_curl() {
     fi
 }
 
+# 確認プロンプト。パイプ実行でも端末から読む
+prompt_yes() {
+    local prompt="$1"
+    local reply=""
+
+    if [[ ! -r /dev/tty ]]; then
+        log_warn "対話端末がありません。非対話で続行するには -y を指定してください。"
+        return 1
+    fi
+
+    if ! read -rp "$prompt" reply </dev/tty; then
+        return 1
+    fi
+
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# APT 署名検証用の gpg
+ensure_gpg() {
+    if command -v gpg &>/dev/null; then
+        return 0
+    fi
+
+    log_info "パッケージ署名の検証に必要な gpg をインストールしています..."
+    if sudo apt install -y gpg; then
+        return 0
+    fi
+
+    log_warn "gpg のインストールに失敗しました。"
+    return 1
+}
+
+# ja_JP.UTF-8 が無ければ有効化する。失敗してもインストールは続行する
+ensure_ja_locale() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] ja_JP.UTF-8 ロケールの確認と有効化を実行する予定"
+        return 0
+    fi
+
+    if locale -a 2>/dev/null | grep -qiE '^ja_JP\.(utf8|UTF-8)$'; then
+        log_info "ja_JP.UTF-8 は既に有効です。"
+        return 0
+    fi
+
+    log_info "ja_JP.UTF-8 ロケールを有効化しています..."
+    if ! sudo apt install -y locales; then
+        log_warn "locales のインストールに失敗しました。LANG は利用可能なロケールにフォールバックします。"
+        return 0
+    fi
+
+    if [[ -f /etc/locale.gen ]]; then
+        if grep -qE '^# *ja_JP\.UTF-8 UTF-8' /etc/locale.gen; then
+            sudo sed -i 's/^# *\(ja_JP\.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+        elif ! grep -qE '^ja_JP\.UTF-8 UTF-8' /etc/locale.gen; then
+            echo 'ja_JP.UTF-8 UTF-8' | sudo tee -a /etc/locale.gen >/dev/null
+        fi
+    fi
+
+    if sudo locale-gen ja_JP.UTF-8; then
+        log_success "ja_JP.UTF-8 を有効化しました。"
+    else
+        log_warn "ja_JP.UTF-8 の生成に失敗しました。LANG は利用可能なロケールにフォールバックします。"
+    fi
+}
+
+# Debian の fd-find は実体が fdfind なので、fd からも呼べるようにする
+link_fd_binary() {
+    local fdfind_path=""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        return 0
+    fi
+
+    if command -v fd &>/dev/null; then
+        return 0
+    fi
+
+    fdfind_path=$(command -v fdfind 2>/dev/null || true)
+    if [[ -n "$fdfind_path" ]]; then
+        sudo mkdir -p /usr/local/bin
+        sudo ln -sfn "$fdfind_path" /usr/local/bin/fd || log_warn "fd へのシンボリックリンク作成に失敗しました。"
+    fi
+}
+
 # macOS用インストール関数
 install_fish_macos() {
     log_info "macOS用のFishインストールを開始します..."
@@ -328,6 +462,14 @@ install_fish_macos() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Homebrewの確認とFishのインストールを実行する予定"
         return 0
+    fi
+
+    if ! command -v brew &> /dev/null; then
+        if [[ -x /opt/homebrew/bin/brew ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [[ -x /usr/local/bin/brew ]]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
     fi
 
     if ! command -v brew &> /dev/null; then
@@ -385,15 +527,8 @@ install_eza_debian() {
         return 0
     fi
 
-    # アーキテクチャを確認
-    local arch
-    arch=$(detect_architecture)
-    log_debug "検出されたアーキテクチャ: $arch"
-
-    # armhf は eza のバイナリがない場合がある
-    if [[ "$arch" == "armhf" ]]; then
-        log_warn "armhf アーキテクチャでは eza が利用できない可能性があります。"
-        log_info "代わりに標準の ls を使用します。"
+    if ! ensure_gpg; then
+        log_warn "eza をスキップします。標準の ls を使用します。"
         return 1
     fi
 
@@ -406,7 +541,7 @@ install_eza_debian() {
         # 既存のキーを削除
         sudo rm -f /etc/apt/keyrings/gierens.gpg
 
-        sudo gpg --dearmor -o /etc/apt/keyrings/gierens.gpg < "$gpg_key_file" 2>/dev/null || {
+        sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/gierens.gpg < "$gpg_key_file" 2>/dev/null || {
             log_warn "GPGキーの追加に失敗しました。"
             rm -f "$gpg_key_file"
             return 1
@@ -421,7 +556,7 @@ install_eza_debian() {
         sudo chmod 644 /etc/apt/keyrings/gierens.gpg /etc/apt/sources.list.d/gierens.list
 
         # パッケージリストの更新とインストール
-        if sudo apt update 2>/dev/null && sudo apt install -y eza 2>/dev/null; then
+        if sudo apt update >>"$LOG_FILE" 2>&1 && sudo apt install -y eza >>"$LOG_FILE" 2>&1; then
             log_success "ezaのインストールが完了しました。"
             return 0
         fi
@@ -449,17 +584,25 @@ install_fish_ubuntu() {
         return 1
     }
 
-    # Ubuntuの場合のみPPAを使用
+    # Ubuntuの場合のみ Fish 4 の PPA を使用
     if [[ "$os_type" == "ubuntu" ]]; then
-        log_info "Fish PPAを追加しています..."
-        # software-properties-commonが必要
+        log_info "Fish 4 PPAを追加しています..."
         sudo apt install -y software-properties-common 2>/dev/null || true
 
-        if command -v apt-add-repository &>/dev/null; then
-            sudo apt-add-repository ppa:fish-shell/release-3 -y 2>/dev/null || {
+        local add_repo=""
+        if command -v add-apt-repository &>/dev/null; then
+            add_repo="add-apt-repository"
+        elif command -v apt-add-repository &>/dev/null; then
+            add_repo="apt-add-repository"
+        fi
+
+        if [[ -n "$add_repo" ]]; then
+            if ! sudo "$add_repo" -y ppa:fish-shell/release-4; then
                 log_warn "Fish PPAの追加に失敗しました。標準リポジトリを使用します。"
-            }
-            sudo apt update 2>/dev/null || true
+            fi
+            sudo apt update || log_warn "PPA追加後のパッケージリスト更新に失敗しました。"
+        else
+            log_warn "add-apt-repository が見つかりません。標準リポジトリを使用します。"
         fi
     fi
 
@@ -494,6 +637,9 @@ install_fish_ubuntu() {
             log_warn "$package のインストールに失敗しました（オプション）。"
         fi
     done
+
+    link_fd_binary
+    ensure_ja_locale
 
     log_success "Ubuntu/Debian用のFishインストールが完了しました。"
     log_info "オプションパッケージ: $installed_optional/${#optional_packages[@]} インストール済み"
@@ -536,26 +682,29 @@ install_fish_raspberrypi() {
     if [[ "$fish_installed" != "true" ]]; then
         log_warn "標準リポジトリからのインストールに失敗しました。"
 
-        # Bookworm (Debian 12) 以降は標準リポジトリにfishがある
-        if [[ -n "$debian_version" ]] && [[ "$debian_version" -ge 12 ]]; then
-            log_error "Debian $debian_version の標準リポジトリからのfishインストールに失敗しました。"
-            log_error "以下を手動で試してください:"
-            log_error "  sudo apt update"
-            log_error "  sudo apt install -y fish"
-            return 1
-        fi
-
-        log_info "openSUSE Build Serviceからのインストールを試行します..."
-
         if [[ -z "$debian_version" ]]; then
             log_error "Debianバージョンの取得に失敗しました。"
             log_error "手動で以下を試してください: sudo apt install fish"
             return 1
         fi
 
-        # GPGキーの取得と検証
+        # Debian 12 以降は Fish 4、それより前は Fish 3 の OBS リポジトリを使う
+        local fish_series="3"
+        if [[ "$debian_version" -ge 12 ]]; then
+            fish_series="4"
+        fi
+
+        log_info "openSUSE Build Service (fish ${fish_series}.x) からのインストールを試行します..."
+
+        if ! ensure_gpg; then
+            log_error "GPG が無いため、外部リポジトリから fish をインストールできません。"
+            return 1
+        fi
+
+        local repo_url="https://download.opensuse.org/repositories/shells:/fish:/release:/${fish_series}/Debian_${debian_version}"
         local gpg_key_file="/tmp/fish_opensuse_$$.key"
-        local repo_url="https://download.opensuse.org/repositories/shells:fish:release:3/Debian_${debian_version}"
+        local keyring="/etc/apt/keyrings/shells_fish_release_${fish_series}.gpg"
+        local list_file="/etc/apt/sources.list.d/shells_fish_release_${fish_series}.list"
 
         log_debug "リポジトリURL: $repo_url"
 
@@ -566,17 +715,21 @@ install_fish_raspberrypi() {
             return 1
         fi
 
-        # GPGキーの追加
-        sudo rm -f /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg
-        if ! gpg --dearmor < "$gpg_key_file" 2>/dev/null | sudo tee /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg > /dev/null; then
+        sudo mkdir -p /etc/apt/keyrings
+        sudo rm -f "$keyring" \
+            /etc/apt/trusted.gpg.d/shells_fish_release_3.gpg \
+            /etc/apt/sources.list.d/shells_fish_release_3.list
+
+        if ! gpg --batch --yes --dearmor < "$gpg_key_file" | sudo tee "$keyring" > /dev/null; then
             log_error "GPGキーの変換に失敗しました。"
             rm -f "$gpg_key_file"
             return 1
         fi
         rm -f "$gpg_key_file"
+        sudo chmod 644 "$keyring"
 
-        # リポジトリの追加
-        echo "deb ${repo_url}/ /" | sudo tee /etc/apt/sources.list.d/shells_fish_release_3.list > /dev/null
+        echo "deb [signed-by=${keyring}] ${repo_url}/ /" | sudo tee "$list_file" > /dev/null
+        sudo chmod 644 "$list_file"
 
         if ! sudo apt update; then
             log_warn "パッケージリストの更新に警告がありました。"
@@ -605,6 +758,8 @@ install_fish_raspberrypi() {
     for package in "${optional_packages[@]}"; do
         sudo apt install -y "$package" 2>/dev/null || log_warn "$package のインストールに失敗しました（オプション）。"
     done
+
+    ensure_ja_locale
 
     log_success "Raspberry Pi用のFishインストールが完了しました。"
 }
@@ -667,6 +822,11 @@ get_fish_path() {
 # fishの動作確認
 verify_fish_works() {
     local fish_path="$1"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] fishの動作確認を実行する予定: $fish_path"
+        return 0
+    fi
 
     log_info "fishの動作確認を行っています..."
 
@@ -767,8 +927,7 @@ change_default_shell() {
         log_warn "========================================"
 
         if [[ "$AUTO_YES" != "true" ]]; then
-            read -rp "デフォルトシェルを変更しますか? (y/N): " reply
-            if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+            if ! prompt_yes "デフォルトシェルを変更しますか? (y/N): "; then
                 log_info "シェル変更をスキップします。"
                 log_info "fishを使用するには: exec fish"
                 return 0
@@ -927,16 +1086,17 @@ create_fish_config() {
 # ------------------------------------
 
 # ファイル操作 - eza (exaの後継) を優先使用
+# --icons は Nerd Font が必要。有効化例は README を参照
 if command -q eza
-    abbr --add ll "eza -l --icons --git"
-    abbr --add la "eza -la --icons --git"
-    abbr --add lt "eza -la --icons --git --tree --level=2"
-    abbr --add ee "eza -aal --icons --git"
+    abbr --add ll "eza -l --git"
+    abbr --add la "eza -la --git"
+    abbr --add lt "eza -la --git --tree --level=2"
+    abbr --add ee "eza -aal --git"
 else if command -q exa
-    abbr --add ll "exa -l --icons"
-    abbr --add la "exa -la --icons"
-    abbr --add lt "exa -la --icons --tree --level=2"
-    abbr --add ee "exa -aal --icons"
+    abbr --add ll "exa -l"
+    abbr --add la "exa -la"
+    abbr --add lt "exa -la --tree --level=2"
+    abbr --add ee "exa -aal"
 else
     abbr --add ll "ls -lh"
     abbr --add la "ls -lah"
@@ -951,7 +1111,16 @@ else if command -q batcat
 end
 
 # システム管理
-abbr --add update "sudo apt update && sudo apt upgrade -y"
+switch (uname)
+    case Darwin
+        if command -q brew
+            abbr --add update "brew update && brew upgrade"
+        end
+    case '*'
+        if command -q apt
+            abbr --add update "sudo apt update && sudo apt upgrade -y"
+        end
+end
 abbr --add grep "grep --color=auto"
 abbr --add .. "cd .."
 abbr --add ... "cd ../.."
@@ -985,6 +1154,8 @@ set -g theme_display_date yes
 set -g theme_date_format "+%F %H:%M"
 set -g theme_display_git_default_branch yes
 set -g theme_color_scheme dark
+# 端末フォントに依存しない表示にする。Nerd Font 利用時は README の手順で切り替える
+set -g theme_powerline_fonts no
 set -g theme_nerd_fonts no
 set -g theme_display_cmd_duration yes
 
@@ -998,9 +1169,8 @@ end
 # ------------------------------------
 # Key bindings
 # ------------------------------------
-function fish_user_key_bindings
-    bind \cr history-search-backward
-end
+# Ctrl+R はここでは割り当てない。
+# fzf.fish がある場合は履歴のあいまい検索、無い場合は Fish 標準のままにする。
 
 # ------------------------------------
 # Environment variables
@@ -1013,7 +1183,16 @@ else
     set -gx EDITOR nano
 end
 
-set -gx LANG ja_JP.UTF-8
+# ja_JP.UTF-8 が生成済みのときだけ使う。無い環境では警告の出ないロケールに落とす
+if command -q locale
+    if locale -a 2>/dev/null | string match -qiq 'ja_JP.utf*'
+        set -gx LANG ja_JP.UTF-8
+    else if locale -a 2>/dev/null | string match -qiq 'C.utf*'
+        set -gx LANG C.UTF-8
+    else if locale -a 2>/dev/null | string match -qiq 'en_US.utf*'
+        set -gx LANG en_US.UTF-8
+    end
+end
 
 # ------------------------------------
 # PATH settings
@@ -1068,9 +1247,7 @@ confirm_installation() {
     echo "  - 設定ファイルの作成"
     echo
 
-    read -rp "続行しますか? (y/N): " reply
-
-    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+    if ! prompt_yes "続行しますか? (y/N): "; then
         log_info "インストールがキャンセルされました。"
         exit 0
     fi
@@ -1079,6 +1256,11 @@ confirm_installation() {
 # インストール検証
 verify_installation() {
     local fish_path="${1:-}"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] インストール結果の検証を実行する予定"
+        return 0
+    fi
 
     log_info "インストールの検証を行っています..."
 
